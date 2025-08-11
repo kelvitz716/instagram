@@ -1,0 +1,12 @@
+.env
+bot_data.db
+cookies.txt
+gallery-dl.conf
+telegram_bot_session.session
+telegram_bot_session.session-journal
+__pycache__/bot.cpython-313.pyc
+downloads/2025-08-08_13-34-45_UTC_1.jpg
+downloads/2025-08-08_13-34-45_UTC_2.jpg
+downloads/2025-08-08_13-34-45_UTC_3.jpg
+downloads/2025-08-08_13-34-45_UTC_4.jpg
+downloads/2025-08-08_13-34-45_UTC_5.jpg
