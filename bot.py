@@ -696,12 +696,7 @@ class EnhancedTelegramBot:
 
     def _find_media_files(self) -> List[Path]:
         """Find all media files in downloads directory."""
-        supported_extensions = {
-            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff',
-            '.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm',
-            '.pdf', '.doc', '.docx', '.txt', '.zip', '.rar', '.7z',
-            '.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a'
-        }
+        supported_extensions = self._get_supported_extensions()
 
         files = []
         for file_path in self.downloads_path.rglob('*'):
@@ -719,21 +714,50 @@ class EnhancedTelegramBot:
                 return f"{size:.1f} {unit}"
             size /= 1024
         return f"{size:.1f} PB"
+    
+    def _get_supported_extensions(self) -> set:
+        """Get set of supported file extensions."""
+        return {
+            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff',
+            '.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm',
+            '.pdf', '.doc', '.docx', '.txt', '.zip', '.rar', '.7z',
+            '.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a'
+        }
 
     def _find_recently_modified_files(self, directory: Path, time_threshold: int) -> List[Path]:
         """Find files modified within the last `time_threshold` seconds."""
         current_time = time.time()
-        recent_files = [f for f in directory.iterdir()
-                        if f.is_file() and (current_time - f.stat().st_mtime) < time_threshold]
-        return recent_files
+        recent_files = []
+        supported_extensions = self._get_supported_extensions()
+        
+        for file_path in directory.rglob('*'):
+            if (file_path.is_file() and 
+                (current_time - file_path.stat().st_mtime) < time_threshold and
+                file_path.suffix.lower() in supported_extensions):
+                recent_files.append(file_path)
+        
+        return sorted(recent_files, key=lambda x: x.stat().st_mtime, reverse=True)
 
-    def _find_newly_downloaded_files(self, directory: Path) -> List[Path]:
-        """Async setup only, no run_polling here."""
-        if self.bot_app is None:
-            raise RuntimeError("Bot application is not initialized")
+    def _find_newly_downloaded_files(self, directory: Path, time_threshold: int = 300) -> List[Path]:
+        """Find files downloaded within the last `time_threshold` seconds."""
+        current_time = time.time()
+        recent_files = []
+        supported_extensions = self._get_supported_extensions()
+        
+        for file_path in directory.rglob('*'):
+            if (file_path.is_file() and 
+                (current_time - file_path.stat().st_mtime) < time_threshold and
+                file_path.suffix.lower() in supported_extensions):
+                recent_files.append(file_path)
+        
+        return sorted(recent_files, key=lambda x: x.stat().st_mtime, reverse=True)
 
-        # Start file watcher if auto enabled
-        if self.settings.auto_watch_files and self.observer and not self.is_watching:
+    def _start_file_watcher_if_needed(self):
+        """Start file watcher if auto-watch is enabled and not already running."""
+        if (self.settings.auto_watch_files and 
+            self.observer and 
+            not self.is_watching and 
+            self.bot_app is not None):
             self.observer.start()
             self.is_watching = True
             logger.info("Auto file watcher started")
@@ -778,6 +802,9 @@ async def main():
     bot = EnhancedTelegramBot(settings)
     await bot.initialize()
 
+    # Start file watcher if needed
+    bot._start_file_watcher_if_needed()
+
     if bot.bot_app is None:
         logger.error("Bot application failed to initialize.")
         return
@@ -786,11 +813,7 @@ async def main():
     shutdown_event = asyncio.Future()
 
     try:
-        if bot.settings.auto_watch_files and bot.observer and not bot.is_watching:
-            bot.observer.start()
-            bot.is_watching = True
-            logger.info("Auto file watcher started")
-
+        
         await bot.bot_app.initialize()
         await bot.bot_app.start()
         await bot.bot_app.updater.start_polling()
