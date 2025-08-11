@@ -545,7 +545,7 @@ class EnhancedTelegramBot:
 
     async def handle_download_instagram(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
-        Handles the /downloadig command to download a single Instagram post.
+        Handles the /downloadig command to download Instagram content with enhanced progress tracking.
         The downloaded file is then automatically added to the bot's processing queue.
         """
         if not context.args or "instagram.com" not in context.args[0]:
@@ -559,32 +559,80 @@ class EnhancedTelegramBot:
         try:
             # Get files before download to compare later
             files_before = set(self._get_all_files_in_directory(self.downloads_path))
+            # Determine content type from URL for better messaging
+            content_type = self._determine_instagram_content_type(url)          
             
             # Run the blocking Instaloader download function in a separate thread
-            download_result = await asyncio.to_thread(self._download_instagram_post, url)
+            download_result = await asyncio.to_thread(self._download_instagram_post, url, content_type)
 
             if download_result["success"]:
-                logger.info("Instagram download successful", downloaded_files=download_result["files"])
-                await status_msg.edit_text("✅ Download successful! Processing files...")
+                media_count = download_result.get("media_count", 1)
+                logger.info("Instagram download successful", media_count=media_count, content_type=content_type)
 
                 # Get files after download
                 files_after = set(self._get_all_files_in_directory(self.downloads_path))
                 newly_downloaded_files = list(files_after - files_before)
 
                 if newly_downloaded_files:
-                    logger.info("Found newly downloaded files", count=len(newly_downloaded_files), files=[f.name for f in newly_downloaded_files])
-                    processed_count = 0
-                    for file_path in newly_downloaded_files:
-                        if file_path.suffix.lower() in self._get_supported_extensions():
-                            await self.process_single_file(file_path)
-                            processed_count += 1
+                    # Filter for supported media files
+                    media_files = [f for f in newly_downloaded_files if f.suffix.lower() in self._get_supported_extensions()]
+                    
+                    if media_files:
+                        # Determine plural form for content type
+                        content_type_plural = self._get_content_type_plural(content_type)
+                        
+                        # Send initial progress message
+                        await status_msg.edit_text(
+                            f"📥 Found {len(media_files)} unique {content_type_plural}. Sending 1 to {len(media_files)} now..."
+                        )
+                        
+                        logger.info("Processing Instagram media", count=len(media_files), type=content_type)
+                        
+                        # Process files with enhanced progress tracking
+                        successful_uploads = 0
+                        for i, file_path in enumerate(media_files, 1):
+                            try:
+                                # Send individual progress message
+                                progress_msg = f"Instagram {content_type} ({i}/{len(media_files)})"
+                                
+                                # Process the file
+                                success = await self._process_instagram_media_file(file_path, progress_msg, i, len(media_files), content_type)
+                                
+                                if success:
+                                    successful_uploads += 1
+                                    
+                                    # Send individual success notification to target chat
+                                    try:
+                                        await self.bot_app.bot.send_message(
+                                            chat_id=self.settings.target_chat_id,
+                                            text=progress_msg
+                                        )
+                                    except Exception as e:
+                                        logger.warning("Failed to send progress message", error=str(e))
+                                
+                                # Small delay between uploads for better UX
+                                if i < len(media_files):
+                                    await asyncio.sleep(0.5)
+                                    
+                            except Exception as e:
+                                logger.error("Error processing Instagram media", error=str(e), filename=file_path.name)
+                        
+                        # Send completion messages
+                        if successful_uploads > 0:
+                            # First completion message
+                            completion_msg = f"✅ Successfully sent {successful_uploads} of {len(media_files)} {content_type_plural}."
+                            await self.bot_app.bot.send_message(
+                                chat_id=self.settings.target_chat_id,
+                                text=completion_msg
+                            )
+                            
+                            # Final success message
+                            final_msg = f"✅ All {successful_uploads} unique {content_type_plural} sent successfully!"
+                            await status_msg.edit_text(final_msg)
                         else:
-                            logger.info("Skipping unsupported file", filename=file_path.name)
-
-                    if processed_count > 0:
-                        await status_msg.edit_text(f"✅ Download and upload complete! Processed {processed_count} files.")
+                            await status_msg.edit_text("❌ Failed to upload any media files.")
                     else:
-                        await status_msg.edit_text("✅ Download complete, but no supported media files found.")
+                        await status_msg.edit_text("❌ No supported media files found in downloaded content.")
                 else:
                     logger.warning("No new files found after download", 
                                 files_before=len(files_before), files_after=len(files_after))
@@ -595,9 +643,149 @@ class EnhancedTelegramBot:
 
         except Exception as e:
             logger.exception("Unexpected error during Instagram download", error=str(e))
-            await status_msg.edit_text(f"❌ An unexpected error occurred: `{e}`")
+            await status_msg.edit_text(f"❌ An unexpected error occurred: `{str(e)[:100]}...`")
+    def _determine_instagram_content_type(self, url: str) -> str:
+        """Determine the type of Instagram content from URL."""
+        url_lower = url.lower()
+        
+        if '/reel/' in url_lower:
+            return 'reel'
+        elif '/stories/' in url_lower or '/story/' in url_lower:
+            return 'story'
+        elif '/p/' in url_lower:
+            # Could be a post or carousel, default to post
+            return 'post'
+        else:
+            # Fallback
+            return 'media'
 
-    def _download_instagram_post(self, url: str) -> bool:
+    def _get_content_type_plural(self, content_type: str) -> str:
+        """Get plural form of content type."""
+        plurals = {
+            'post': 'posts',
+            'reel': 'reels', 
+            'story': 'stories',
+            'carousel': 'carousels',
+            'media': 'media files'
+        }
+        return plurals.get(content_type, f"{content_type}s")
+    async def _process_instagram_media_file(self, file_path: Path, caption: str, media_number: int, total_media: int, content_type: str) -> bool:
+        """Process a single Instagram media file and upload it with enhanced tracking."""
+        try:
+            file_size = file_path.stat().st_size
+            
+            logger.info("Processing Instagram media",
+                        progress=f"{media_number}/{total_media}",
+                        filename=file_path.name,
+                        size=self._format_bytes(file_size),
+                        type=content_type)
+
+            # Determine upload method based on file size
+            if file_size <= self.settings.large_file_threshold:
+                success = await self._send_via_bot_api_direct(file_path, caption)
+                method = "bot_api"
+            else:
+                success = await self._send_via_telethon_direct(file_path, caption)
+                method = "telethon"
+
+            # Log the operation
+            await self.db.log_file_operation(
+                file_path.name, 
+                file_size, 
+                f"{method}_instagram_{content_type}", 
+                success, 
+                None if success else "Upload failed"
+            )
+
+            if success:
+                # Delete file after successful upload
+                try:
+                    await asyncio.to_thread(file_path.unlink)
+                    logger.info("Deleted Instagram media file after upload", filename=file_path.name)
+                except Exception as e:
+                    logger.warning("Failed to delete media file", filename=file_path.name, error=str(e))
+
+            return success
+
+        except Exception as e:
+            logger.error("Error processing Instagram media file", error=str(e), filename=file_path.name)
+            await self.db.log_file_operation(
+                file_path.name, 
+                0, 
+                f"instagram_{content_type}_error", 
+                False, 
+                str(e)
+            )
+            return False
+    async def _send_via_bot_api_direct(self, file_path: Path, caption: str) -> bool:
+        """Direct Bot API upload without queue system for immediate processing."""
+        try:
+            if not file_path.exists():
+                return False
+                
+            file_size = file_path.stat().st_size
+            if file_size > BOT_API_MAX_FILE_SIZE:
+                logger.warning("File too large for Bot API", size=self._format_bytes(file_size))
+                return False
+                
+            mime_type = magic.from_file(str(file_path), mime=True)
+            
+            async with aiofiles.open(file_path, 'rb') as file:
+                file_data = await file.read()
+            
+            # Send based on media type
+            if mime_type.startswith('image/'):
+                await self.bot_app.bot.send_photo(
+                    chat_id=self.settings.target_chat_id,
+                    photo=file_data,
+                    caption=caption
+                )
+            elif mime_type.startswith('video/'):
+                await self.bot_app.bot.send_video(
+                    chat_id=self.settings.target_chat_id,
+                    video=file_data,
+                    caption=caption
+                )
+            else:
+                await self.bot_app.bot.send_document(
+                    chat_id=self.settings.target_chat_id,
+                    document=file_data,
+                    caption=caption
+                )
+            
+            # Small pause to respect rate limits
+            await asyncio.sleep(self.settings.bot_api_pause_seconds)
+            return True
+            
+        except Exception as e:
+            logger.error("Direct Bot API upload failed", error=str(e), filename=file_path.name)
+            return False
+    async def _send_via_telethon_direct(self, file_path: Path, caption: str) -> bool:
+        """Direct Telethon upload without queue system for immediate processing."""
+        try:
+            if not file_path.exists():
+                return False
+                
+            file_size = file_path.stat().st_size
+            if file_size > TELETHON_MAX_FILE_SIZE:
+                logger.warning("File too large for Telethon", size=self._format_bytes(file_size))
+                return False
+            
+            await self.telethon_client.send_file(
+                entity=self.settings.target_chat_id,
+                file=str(file_path),
+                caption=caption
+            )
+            
+            # Small pause to respect rate limits
+            await asyncio.sleep(self.settings.telethon_pause_seconds)
+            return True
+            
+        except Exception as e:
+            logger.error("Direct Telethon upload failed", error=str(e), filename=file_path.name)
+            return False
+
+    def _download_instagram_post(self, url: str, content_type: str = "post") -> dict:
         """Blocking Instaloader download logic to be run in a separate thread."""
         try:
             # Initialize Instaloader with custom settings
@@ -610,7 +798,7 @@ class EnhancedTelegramBot:
                 save_metadata=False,
                 compress_json=False,
                 dirname_pattern=str(self.downloads_path),
-                filename_pattern="{date_utc}_Instagram_{shortcode}",
+                filename_pattern="{date_utc}_Instagram_{shortcode}_{media_id}",
             )
 
             # Try to load existing session
@@ -643,7 +831,7 @@ class EnhancedTelegramBot:
                 shortcode_match = re.search(r'/reel/([A-Za-z0-9_-]+)/', url)
             
             if not shortcode_match:
-                return {"success": False, "error": "Could not extract shortcode from URL", "files": []}
+                return {"success": False, "error": "Could not extract shortcode from URL", "media_count": 0}
  
 
             shortcode = shortcode_match.group(1)
@@ -653,6 +841,17 @@ class EnhancedTelegramBot:
             # Get files before download for comparison
             files_before = self._get_all_files_in_directory(self.downloads_path)
 
+            # Count expected media items (for carousels/multi-media posts)
+            expected_media_count = 1
+            try:
+                if hasattr(post, 'get_sidecar_nodes'):
+                    sidecar_nodes = list(post.get_sidecar_nodes())
+                    if sidecar_nodes:
+                        expected_media_count = len(sidecar_nodes)
+                        logger.info("Detected carousel post", media_count=expected_media_count)
+            except Exception as e:
+                logger.warning("Could not detect carousel items", error=str(e))
+
             # Download the post
             L.download_post(post, target="")  # Empty string uses dirname_pattern
             
@@ -660,10 +859,23 @@ class EnhancedTelegramBot:
             files_after = self._get_all_files_in_directory(self.downloads_path)
             new_files = list(set(files_after) - set(files_before))
 
-            return {"success": True, "error": None, "files": new_files}
+            # Update content type based on what we actually downloaded
+            actual_content_type = content_type
+            if len(new_files) > 1:
+                actual_content_type = "carousel"
+            elif content_type == "post" and any("video" in str(f).lower() for f in new_files):
+                actual_content_type = "reel"
+
+            return {
+                "success": True, 
+                "error": None, 
+                "media_count": len(new_files),
+                "content_type": actual_content_type,
+                "files": new_files
+            }
         except Exception as e:
             logger.error("Instaloader download failed", error=str(e), url=url)
-            return {"success": False, "error": str(e), "files": []}
+            return {"success": False, "error": str(e), "media_count": 0}
 
     def _get_all_files_in_directory(self, directory: Path) -> List[Path]:
         """Get all files in directory recursively."""
