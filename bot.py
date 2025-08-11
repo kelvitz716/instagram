@@ -7,6 +7,7 @@ import asyncio
 import sys
 import os
 import logging
+from asyncio import Lock
 from pathlib import Path
 from typing import Optional, List
 import contextlib
@@ -232,6 +233,9 @@ class EnhancedTelegramBot:
         self.observer: Optional[Observer] = None
         self.is_watching = False  # Track watcher state
 
+        # Thread safety locks
+        self._counter_lock = Lock()
+
         # asyncio event loop reference (set during initialize)
         self.loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -254,6 +258,37 @@ class EnhancedTelegramBot:
         self._single_file_counter: int = 0
         self._single_file_counter_lock = asyncio.Lock()
 
+    async def _increment_completed(self):
+        """Thread-safe increment of completed counter."""
+        async with self._counter_lock:
+            self._completed_count += 1
+            
+    async def _increment_failed(self):
+        """Thread-safe increment of failed counter."""
+        async with self._counter_lock:
+            self._failed_count += 1
+            
+    async def _increment_active_uploads(self):
+        """Thread-safe increment of active uploads counter."""
+        async with self._counter_lock:
+            self._active_uploads += 1
+            
+    async def _decrement_active_uploads(self):
+        """Thread-safe decrement of active uploads counter."""
+        async with self._counter_lock:
+            self._active_uploads -= 1
+            
+    async def _get_counters(self) -> tuple[int, int, int]:
+        """Thread-safe getter for all counters."""
+        async with self._counter_lock:
+            return self._completed_count, self._failed_count, self._active_uploads
+            
+    async def _reset_counters(self):
+        """Thread-safe reset of processing counters."""
+        async with self._counter_lock:
+            self._completed_count = 0
+            self._failed_count = 0
+            self._active_uploads = 0
 
         # Pauses (seconds) between uploads to respect rate limits
         self._bot_api_pause = float(self.settings.bot_api_pause_seconds)
@@ -289,7 +324,7 @@ class EnhancedTelegramBot:
         # Setup file watcher with proper event loop
         self.loop = asyncio.get_running_loop()
         event_handler = FileWatcher(self.process_single_file, self.loop)
-        self._single_file_counter_lock = asyncio.Lock()  # Reinitialize the lock with proper event loop
+        self._counter_lock = Lock()  # Reinitialize the counter lock with proper event loop
         self.observer = Observer()
         self.observer.schedule(event_handler, str(self.downloads_path), recursive=True)
 
@@ -380,9 +415,8 @@ class EnhancedTelegramBot:
             f"🔍 Found {total_files} files. Processing in batches of {self._batch_size}..."
         )
 
-        # Reset counters
-        self._completed_count = 0
-        self._failed_count = 0
+        # Reset counters safely
+        await self._reset_counters()
         current_batch = 1
         total_batches = (total_files + self._batch_size - 1) // self._batch_size
 
@@ -390,12 +424,13 @@ class EnhancedTelegramBot:
             batch = files[i:i + self._batch_size]
             batch_size = len(batch)
 
+            completed, failed, active = await self._get_counters()
             await status_msg.edit_text(
                 f"📤 Processing Batch {current_batch}/{total_batches}\n"
                 f"• Total files: {total_files}\n"
                 f"• Current batch: {batch_size} files\n"
-                f"• Completed: {self._completed_count}/{total_files}\n"
-                f"• Active uploads: {self._active_uploads}"
+                f"• Completed: {completed}/{total_files}\n"
+                f"• Active uploads: {active}"
             )
 
             for idx, file_path in enumerate(batch, 1):
@@ -410,24 +445,27 @@ class EnhancedTelegramBot:
 
                 except FileNotFoundError:
                     logger.warning("File disappeared", filename=file_path.name)
-                    self._failed_count += 1
+                    await self._increment_failed()
 
             # Wait for current batch to complete
+            completed, failed, active = await self._get_counters()
             while (not self.bot_api_queue.empty() or
                 not self.telethon_queue.empty() or
-                self._active_uploads > 0):
+                active > 0):
                 await asyncio.sleep(1)
+                completed, failed, active = await self._get_counters()
 
             current_batch += 1
 
         # Final summary
-        success_rate = (self._completed_count / total_files) * 100
+        completed, failed, active = await self._get_counters()
+        success_rate = (completed / total_files) * 100 if total_files > 0 else 0
         final_message = (
             f"✅ Upload Complete!\n\n"
             f"📊 Summary:\n"
             f"• Total files processed: {total_files}\n"
-            f"• Successfully sent: {self._completed_count}\n"
-            f"• Failed: {self._failed_count}\n"
+            f"• Successfully sent: {completed}\n"
+            f"• Failed: {failed}\n"
             f"• Success rate: {success_rate:.1f}%"
         )
         await status_msg.edit_text(final_message)
@@ -507,21 +545,21 @@ class EnhancedTelegramBot:
         while True:
             file_path, file_number, total_files = await self.bot_api_queue.get()
             try:
-                self._active_uploads += 1
+                await self._increment_active_uploads()
 
                 caption = f"Media File ({file_number}/{total_files})"
                 success = await self._send_via_bot_api(file_path, caption)
 
                 if success:
-                    self._completed_count += 1
+                    await self._increment_completed()
                 else:
-                    self._failed_count += 1
+                    await self._increment_failed()
 
             except Exception as e:
                 logger.exception("Bot API worker error", error=str(e), filename=file_path.name)
-                self._failed_count += 1
+                await self._increment_failed()
             finally:
-                self._active_uploads -= 1
+                await self._decrement_active_uploads()
                 self.bot_api_queue.task_done()
 
     async def _telethon_worker(self):
@@ -530,21 +568,21 @@ class EnhancedTelegramBot:
         while True:
             file_path, file_number, total_files = await self.telethon_queue.get()
             try:
-                self._active_uploads += 1
+                await self._increment_active_uploads()
 
                 caption = f"Media File ({file_number}/{total_files})"
                 success = await self._send_via_telethon(file_path, caption)
 
                 if success:
-                    self._completed_count += 1
+                    await self._increment_completed()
                 else:
-                    self._failed_count += 1
+                    await self._increment_failed()
 
             except Exception as e:
                 logger.exception("Telethon worker error", error=str(e), filename=file_path.name)
-                self._failed_count += 1
+                await self._increment_failed()
             finally:
-                self._active_uploads -= 1
+                await self._decrement_active_uploads()
                 self.telethon_queue.task_done()
 
     @retry(
