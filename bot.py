@@ -81,6 +81,11 @@ class BotSettings(BaseSettings):
     upload_rate_limit: int = Field(5, env='UPLOAD_RATE_LIMIT', description="Uploads per second limit")
     database_path: str = Field('bot_data.db', env='DATABASE_PATH', description="Database file path")
 
+    # Instagram settings
+    instagram_username: Optional[str] = Field(None, env='INSTAGRAM_USERNAME', description="Instagram username for session")
+    firefox_cookies_path: Optional[str] = Field(None, env='FIREFOX_COOKIES_PATH', description="Custom path to Firefox cookies")
+
+
     # Additional optional settings from .env
     log_level: str = Field('INFO', env='LOG_LEVEL', description="Logging level")
     log_file: Optional[str] = Field(None, env='LOG_FILE', description="Log file path")
@@ -408,6 +413,7 @@ class EnhancedTelegramBot:
         self.bot_app.add_handler(CommandHandler("stats", self.handle_stats))
         self.bot_app.add_handler(CommandHandler("watch", self.handle_watch_toggle))
         self.bot_app.add_handler(CommandHandler("downloadig", self.handle_download_instagram))
+        self.bot_app.add_handler(CommandHandler("login", self.handle_instagram_login))
  
     async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command."""
@@ -418,6 +424,7 @@ class EnhancedTelegramBot:
             "• `/stats` - Show detailed statistics\n"
             "• `/watch` - Toggle automatic file watching\n"
             "• `/downloadig <url>` - Download a single Instagram post\n"
+            "• `/login` - Login to Instagram using Firefox cookies\n"
             "• `/start` - Show this help\n\n"
             "Features: Smart file handling, automatic watching, detailed logging",
             parse_mode='Markdown'
@@ -818,6 +825,223 @@ class EnhancedTelegramBot:
         except Exception as e:
             logger.error("Direct Telethon upload failed", error=str(e), filename=file_path.name)
             return False
+        
+    async def handle_instagram_login(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handle /login command to authenticate with Instagram using Firefox cookies.
+        Usage: /login [username] [firefox_profile_name]
+        """
+        username = None
+        firefox_profile = None
+        
+        # Parse command arguments
+        if context.args:
+            if len(context.args) >= 1:
+                username = context.args[0]
+            if len(context.args) >= 2:
+                firefox_profile = context.args[1]
+        
+        # Use default username from settings if not provided
+        if not username and self.settings.instagram_username:
+            username = self.settings.instagram_username
+        elif not username:
+            await update.message.reply_text(
+                "Usage: `/login [username] [firefox_profile]`\n\n"
+                "Examples:\n"
+                "• `/login myusername` - Load cookies for myusername\n"
+                "• `/login myusername default` - Load cookies from specific Firefox profile\n"
+                "• Set `INSTAGRAM_USERNAME` in `.env` to use `/login` without username",
+                parse_mode='Markdown'
+            )
+            return
+        
+        status_msg = await update.message.reply_text(f"🔐 Attempting to login as `{username}` using Firefox cookies...")
+        logger.info("Instagram login attempt", username=username, firefox_profile=firefox_profile)
+        
+        try:
+            # Run the blocking login function in a separate thread
+            login_result = await asyncio.to_thread(
+                self._login_with_firefox_cookies, 
+                username, 
+                firefox_profile
+            )
+            
+            if login_result["success"]:
+                await status_msg.edit_text(
+                    f"✅ Successfully logged in as `{username}`!\n\n"
+                    f"Session details:\n"
+                    f"• Username: `{login_result.get('username', username)}`\n"
+                    f"• User ID: `{login_result.get('user_id', 'N/A')}`\n"
+                    f"• Session saved: `{login_result.get('session_file', 'N/A')}`\n\n"
+                    "You can now use `/downloadig` to download Instagram content.",
+                    parse_mode='Markdown'
+                )
+                logger.info("Instagram login successful", username=username)
+                
+            else:
+                error_msg = login_result.get("error", "Unknown error")
+                await status_msg.edit_text(
+                    f"❌ Login failed: `{error_msg}`\n\n"
+                    "**Troubleshooting:**\n"
+                    "• Make sure you're logged into Instagram on Firefox\n"
+                    "• Try visiting instagram.com in Firefox first\n"
+                    "• Check if Firefox is properly closed during login attempt\n"
+                    "• Ensure Firefox profile contains Instagram cookies",
+                    parse_mode='Markdown'
+                )
+                logger.error("Instagram login failed", username=username, error=error_msg)
+                
+        except Exception as e:
+            logger.exception("Unexpected error during Instagram login", error=str(e))
+            await status_msg.edit_text(
+                f"❌ Login error: `{str(e)[:100]}...`\n\n"
+                "Please try again or check the logs for details.",
+                parse_mode='Markdown'
+            )
+    def _login_with_firefox_cookies(self, username: str, firefox_profile: Optional[str] = None) -> dict:
+        """
+        Login to Instagram using Firefox cookies.
+        This is a blocking function to be run in a separate thread.
+        """
+        try:
+            import tempfile
+            import shutil
+            from pathlib import Path
+            
+            # Create a temporary Instaloader instance for login
+            temp_dir = tempfile.mkdtemp()
+            temp_session_file = os.path.join(temp_dir, f"session-{username}")
+            
+            try:
+                # Initialize Instaloader for login
+                L = instaloader.Instaloader(
+                    dirname_pattern=temp_dir,
+                    filename_pattern="temp_{shortcode}",
+                    download_pictures=False,
+                    download_videos=False,
+                    download_video_thumbnails=False,
+                    download_geotags=False,
+                    download_comments=False,
+                    save_metadata=False,
+                    compress_json=False,
+                )
+                
+                logger.info("Loading Instagram cookies from Firefox", username=username, profile=firefox_profile)
+                
+                # Determine Firefox profile path
+                if firefox_profile:
+                    # Custom profile specified
+                    if self.settings.firefox_cookies_path:
+                        # Use custom path from settings
+                        cookies_path = self.settings.firefox_cookies_path
+                    else:
+                        # Try standard Firefox profile paths
+                        home_dir = Path.home()
+                        possible_paths = [
+                            home_dir / ".mozilla" / "firefox" / firefox_profile / "cookies.sqlite",
+                            home_dir / "snap" / "firefox" / "common" / ".mozilla" / "firefox" / firefox_profile / "cookies.sqlite",
+                            home_dir / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox" / firefox_profile / "cookies.sqlite"
+                        ]
+                        cookies_path = None
+                        for path in possible_paths:
+                            if path.exists():
+                                cookies_path = str(path)
+                                break
+                else:
+                    cookies_path = None
+                
+                # Load cookies using different methods
+                if cookies_path and os.path.exists(cookies_path):
+                    logger.info("Using custom Firefox cookies path", path=cookies_path)
+                    # For custom paths, we need to handle this differently
+                    # This would require additional implementation for direct cookie file reading
+                    L.load_session_from_file(username, filename=cookies_path)
+                else:
+                    # Use Instaloader's built-in Firefox cookie loading
+                    logger.info("Using Instaloader's Firefox cookie loading")
+                    
+                    # Import cookies from Firefox
+                    L.context._session.cookies.update(L.context._get_firefox_cookies())
+                    
+                    # Try to get user info to validate login
+                    profile = instaloader.Profile.from_username(L.context, username)
+                    
+                    # Save session if successful
+                    L.save_session_to_file(username)
+                    
+                    logger.info("Firefox cookies loaded successfully", 
+                              username=username, 
+                              user_id=profile.userid if hasattr(profile, 'userid') else 'N/A')
+                
+                # Copy session file to proper location
+                session_dir = Path.home() / ".config" / "instaloader"
+                session_dir.mkdir(parents=True, exist_ok=True)
+                final_session_file = session_dir / f"session-{username}"
+                
+                if os.path.exists(temp_session_file):
+                    shutil.copy2(temp_session_file, final_session_file)
+                    logger.info("Session file saved", path=str(final_session_file))
+                
+                return {
+                    "success": True,
+                    "username": username,
+                    "user_id": getattr(profile, 'userid', None) if 'profile' in locals() else None,
+                    "session_file": str(final_session_file),
+                    "error": None
+                }
+                
+            finally:
+                # Clean up temporary directory
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception as cleanup_error:
+                    logger.warning("Failed to clean up temp directory", error=str(cleanup_error))
+                
+        except instaloader.exceptions.BadCredentialsException:
+            return {
+                "success": False,
+                "error": "Invalid credentials or cookies expired",
+                "username": username
+            }
+        except instaloader.exceptions.ConnectionException as e:
+            return {
+                "success": False,
+                "error": f"Connection error: {str(e)}",
+                "username": username
+            }
+        except Exception as e:
+            logger.error("Firefox cookie login failed", error=str(e), username=username)
+            return {
+                "success": False,
+                "error": str(e),
+                "username": username
+            }
+    def _get_firefox_cookies_direct(self) -> dict:
+        """
+        Alternative method to load Firefox cookies directly from SQLite database.
+        This method provides more control over cookie extraction.
+        """
+        try:
+            import sqlite3
+            import browser_cookie3
+            from urllib.parse import urlparse
+            
+            # Use browser_cookie3 library for more reliable cookie extraction
+            cookies = browser_cookie3.firefox(domain_name='instagram.com')
+            
+            cookie_dict = {}
+            for cookie in cookies:
+                cookie_dict[cookie.name] = cookie.value
+            
+            logger.info("Firefox cookies extracted", count=len(cookie_dict))
+            return cookie_dict
+            
+        except ImportError:
+            logger.warning("browser_cookie3 not installed, falling back to instaloader method")
+            return {}
+        except Exception as e:
+            logger.error("Failed to extract Firefox cookies directly", error=str(e))
+            return {}
 
     def _download_instagram_post(self, url: str, content_type: str = "post") -> dict:
         """Blocking Instaloader download logic to be run in a separate thread."""
@@ -835,10 +1059,10 @@ class EnhancedTelegramBot:
                 filename_pattern="{date_utc}_Instagram_{shortcode}",
             )
 
-            # Try to load existing session
+             # Try to load existing session (enhanced with better error handling)
             session_loaded = False
             try:
-                # First try with username if available
+                # First try with username from settings if available
                 if hasattr(self.settings, 'instagram_username') and self.settings.instagram_username:
                     L.load_session_from_file(self.settings.instagram_username)
                     session_loaded = True
@@ -854,8 +1078,10 @@ class EnhancedTelegramBot:
                         L.load_session_from_file(username)
                         session_loaded = True
                         logger.info("Loaded Instagram session from latest file", username=username)
+                    else:
+                        logger.info("No existing Instagram sessions found - downloads may be limited")
             except Exception as e:
-                logger.warning("Could not load Instagram session", error=str(e))
+                logger.warning("Could not load Instagram session - use /login to authenticate", error=str(e))
                 session_loaded = False
             
             # Extract shortcode from URL
