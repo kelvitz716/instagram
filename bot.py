@@ -994,7 +994,6 @@ class EnhancedTelegramBot:
         return {
             '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff',
             '.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm',
-            '.pdf', '.doc', '.docx', '.txt', '.zip', '.rar', '.7z',
             '.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a'
         }
 
