@@ -59,6 +59,11 @@ console = Console()
 
 BOT_VERSION = "1.0.0"
 
+# Resource limits
+BOT_API_MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB limit for Bot API
+TELETHON_MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB limit for Telethon
+MAX_MEMORY_USAGE_PER_FILE = 100 * 1024 * 1024  # 100MB max memory per file
+
 
 class BotSettings(BaseSettings):
     """Configuration management using Pydantic Settings."""
@@ -148,12 +153,24 @@ class DatabaseManager:
             except Exception as fallback_error:
                 logger.critical("Failed to create fallback database", error=str(fallback_error))
                 self._conn = None
+               
+    async def _ensure_connection(self) -> bool:
+        """Ensure database connection is valid, recreate if needed."""
+        if not self._conn:
+            logger.warning("Database connection lost, attempting to reconnect")
+            try:
+                await self.initialize()
+                return self._conn is not None
+            except Exception as e:
+                logger.error("Failed to reconnect to database", error=str(e))
+                return False
+        return True
 
     async def log_file_operation(self, filename: str, file_size: int, method: str,
                                  success: bool, error_msg: Optional[str] = None):
         """Log a file operation to database."""
-        if not self._conn:
-            logger.warning("Database connection unavailable, skipping log operation", filename=filename)
+        if not await self._ensure_connection():
+            logger.warning("Database unavailable, skipping log operation", filename=filename)
             return
             
         try:
@@ -169,8 +186,8 @@ class DatabaseManager:
 
     async def get_statistics(self) -> dict:
         """Get bot statistics from database."""
-        if not self._conn:
-            logger.warning("Database connection unavailable, returning zero statistics")
+        if not await self._ensure_connection():
+            logger.warning("Database unavailable, returning zero statistics")
             return {'total_files': 0, 'successful': 0, 'failed': 0, 'total_bytes_sent': 0}
             
         try:
@@ -199,13 +216,20 @@ class DatabaseManager:
         """Close DB connection."""
         try:
             if self._conn:
+                # Ensure all pending operations are committed
+                await self._conn.commit()
                 await self._conn.close()
                 logger.info("Database connection closed successfully")
         except Exception as e:
             logger.error("Error closing database connection", error=str(e))
         finally:
             self._conn = None
-
+       
+    async def __aenter__(self):
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
 
 class FileWatcher(FileSystemEventHandler):
     """Watch Downloads directory for new files and trigger callback."""
@@ -702,6 +726,22 @@ class EnhancedTelegramBot:
                         logger.error("File access error", filename=file_path.name, error=str(e))
                         await self.db.log_file_operation(file_path.name, 0, "bot_api", False, f"File access error: {str(e)}")
                         return False
+                    
+                    # Check file size limits for Bot API
+                    if file_size > BOT_API_MAX_FILE_SIZE:
+                        error_msg = f"File too large for Bot API: {self._format_bytes(file_size)} > {self._format_bytes(BOT_API_MAX_FILE_SIZE)}"
+                        logger.error("File too large for Bot API", filename=file_path.name, size=self._format_bytes(file_size))
+                        await self.db.log_file_operation(file_path.name, file_size, "bot_api", False, error_msg)
+                        return False
+                        
+                    # Check memory usage limits
+                    if file_size > MAX_MEMORY_USAGE_PER_FILE:
+                        error_msg = f"File too large for memory loading: {self._format_bytes(file_size)}"
+                        logger.error("File too large for memory", filename=file_path.name, size=self._format_bytes(file_size))
+                        await self.db.log_file_operation(file_path.name, file_size, "bot_api", False, error_msg)
+                        return False
+
+                    file_data = None
 
                     try:
                         async with aiofiles.open(file_path, 'rb') as file:
@@ -710,25 +750,33 @@ class EnhancedTelegramBot:
                         logger.error("Failed to read file", filename=file_path.name, error=str(e))
                         await self.db.log_file_operation(file_path.name, file_size, "bot_api", False, f"Read error: {str(e)}")
                         return False
+                    except MemoryError as e:
+                        logger.error("Out of memory reading file", filename=file_path.name, size=self._format_bytes(file_size))
+                        await self.db.log_file_operation(file_path.name, file_size, "bot_api", False, "Out of memory")
+                        return False
 
-                    if mime_type.startswith('image/'):
-                        await self.bot_app.bot.send_photo(
-                            chat_id=self.settings.target_chat_id,
-                            photo=file_data,
-                            caption=caption
-                        )
-                    elif mime_type.startswith('video/'):
-                        await self.bot_app.bot.send_video(
-                            chat_id=self.settings.target_chat_id,
-                            video=file_data,
-                            caption=caption
-                        )
-                    else:
-                        await self.bot_app.bot.send_document(
-                            chat_id=self.settings.target_chat_id,
-                            document=file_data,
-                            caption=caption
-                        )
+                    try:
+                        if mime_type.startswith('image/'):
+                            await self.bot_app.bot.send_photo(
+                                chat_id=self.settings.target_chat_id,
+                                photo=file_data,
+                                caption=caption
+                            )
+                        elif mime_type.startswith('video/'):
+                            await self.bot_app.bot.send_video(
+                                chat_id=self.settings.target_chat_id,
+                                video=file_data,
+                                caption=caption
+                            )
+                        else:
+                            await self.bot_app.bot.send_document(
+                                chat_id=self.settings.target_chat_id,
+                                document=file_data,
+                                caption=caption
+                            )
+                    finally:
+                        # Explicitly clear file_data from memory
+                        file_data = None
 
                     # Log successful upload
                     await self.db.log_file_operation(file_path.name, file_size, "bot_api", True)
@@ -788,6 +836,14 @@ class EnhancedTelegramBot:
                         await self.db.log_file_operation(file_path.name, 0, "telethon", False, f"File access error: {str(e)}")
                         return False
                     
+                    # Check file size limits for Telethon
+                    if file_size > TELETHON_MAX_FILE_SIZE:
+                        error_msg = f"File too large for Telethon: {self._format_bytes(file_size)} > {self._format_bytes(TELETHON_MAX_FILE_SIZE)}"
+                        logger.error("File too large for Telethon", filename=file_path.name, size=self._format_bytes(file_size))
+                        await self.db.log_file_operation(file_path.name, file_size, "telethon", False, error_msg)
+                        return False
+                    
+                    # Telethon handles large files more efficiently (streams), so no memory check needed                    
                     await self.telethon_client.send_file(
                         entity=self.settings.target_chat_id,
                         file=str(file_path),
@@ -830,12 +886,23 @@ class EnhancedTelegramBot:
         supported_extensions = self._get_supported_extensions()
 
         files = []
-        for file_path in self.downloads_path.rglob('*'):
-            if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
-                files.append(file_path)
+        try:
+            for file_path in self.downloads_path.rglob('*'):
+                try:
+                    if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
+                        files.append(file_path)
+                except (OSError, PermissionError) as e:
+                    logger.warning("Error accessing file during scan", filename=str(file_path), error=str(e))
+        except (OSError, PermissionError) as e:
+            logger.error("Error scanning downloads directory", directory=str(self.downloads_path), error=str(e))
+ 
 
         # Sort newest first (by modification time)
-        return sorted(files, key=lambda x: x.stat().st_mtime, reverse=True)
+        try:
+            return sorted(files, key=lambda x: x.stat().st_mtime, reverse=True)
+        except (OSError, PermissionError) as e:
+            logger.warning("Error sorting files, returning unsorted list", error=str(e))
+            return files
 
     @staticmethod
     def _format_bytes(size: int) -> str:
@@ -868,16 +935,22 @@ class EnhancedTelegramBot:
         try:
             for file_path in directory.rglob('*'):
                 try:
-                    if (file_path.is_file() and 
-                        (current_time - file_path.stat().st_mtime) < time_threshold and
-                        file_path.suffix.lower() in supported_extensions):
-                        recent_files.append(file_path)
+                    if file_path.is_file():
+                        stat_info = file_path.stat()
+                        if ((current_time - stat_info.st_mtime) < time_threshold and
+                            file_path.suffix.lower() in supported_extensions):
+                            recent_files.append(file_path)
                 except (OSError, PermissionError) as e:
                     logger.warning("Error accessing file", filename=str(file_path), error=str(e))
+                    continue
         except (OSError, PermissionError) as e:
             logger.error("Error scanning directory", directory=str(directory), error=str(e))
         
-        return sorted(recent_files, key=lambda x: x.stat().st_mtime, reverse=True)
+        try:
+            return sorted(recent_files, key=lambda x: x.stat().st_mtime, reverse=True)
+        except (OSError, PermissionError) as e:
+            logger.warning("Error sorting recent files, returning unsorted list", error=str(e))
+            return recent_files
 
     def _find_newly_downloaded_files(self, directory: Path, time_threshold: int = 300) -> List[Path]:
         """Find files downloaded within the last `time_threshold` seconds."""
@@ -886,12 +959,21 @@ class EnhancedTelegramBot:
         supported_extensions = self._get_supported_extensions()
         
         for file_path in directory.rglob('*'):
-            if (file_path.is_file() and 
-                (current_time - file_path.stat().st_mtime) < time_threshold and
-                file_path.suffix.lower() in supported_extensions):
-                recent_files.append(file_path)
+            try:
+                if file_path.is_file():
+                    stat_info = file_path.stat()
+                    if ((current_time - stat_info.st_mtime) < time_threshold and
+                        file_path.suffix.lower() in supported_extensions):
+                        recent_files.append(file_path)
+            except (OSError, PermissionError) as e:
+                logger.warning("Error accessing file", filename=str(file_path), error=str(e))
+                continue
         
-        return sorted(recent_files, key=lambda x: x.stat().st_mtime, reverse=True)
+        try:
+            return sorted(recent_files, key=lambda x: x.stat().st_mtime, reverse=True)
+        except (OSError, PermissionError) as e:
+            logger.warning("Error sorting newly downloaded files, returning unsorted list", error=str(e))
+            return recent_files
 
     def _start_file_watcher_if_needed(self):
         """Start file watcher if auto-watch is enabled and not already running."""
@@ -907,18 +989,38 @@ class EnhancedTelegramBot:
         """Shutdown the bot gracefully."""
         logger.info("Shutting down enhanced Telegram bot")
 
-        if self.observer and self.is_watching and self.observer.is_alive():
-            self.observer.stop()
-            self.observer.join()
-            self.is_watching = False
+        shutdown_tasks = []
 
+        # Stop file watcher
+
+        if self.observer and self.is_watching and self.observer.is_alive():
+            try:
+                self.observer.stop()
+                self.observer.join(timeout=5.0)  # Add timeout to prevent hanging
+                self.is_watching = False
+                logger.info("File watcher stopped")
+            except Exception as e:
+                logger.error("Error stopping file watcher", error=str(e))
+
+        # Shutdown Telegram clients
         if self.telethon_client:
-            await self.telethon_client.disconnect()
+            shutdown_tasks.append(self.telethon_client.disconnect())
 
         if self.bot_app:
-            await self.bot_app.shutdown()
+            shutdown_tasks.append(self.bot_app.shutdown())
 
-        await self.db.close()
+         # Close database
+        shutdown_tasks.append(self.db.close())
+
+        # Execute all shutdown tasks concurrently with timeout
+        if shutdown_tasks:
+            try:
+                await asyncio.wait_for(asyncio.gather(*shutdown_tasks, return_exceptions=True), timeout=30.0)
+                logger.info("All components shut down successfully")
+            except asyncio.TimeoutError:
+                logger.warning("Shutdown timeout reached, some components may not have closed cleanly")
+            except Exception as e:
+                logger.error("Error during shutdown", error=str(e))
 
     async def _safe_edit_message(self, message, new_text: str, max_retries: int = 3) -> bool:
         """Safely edit a message with retry logic."""
