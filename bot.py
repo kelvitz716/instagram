@@ -120,53 +120,90 @@ class DatabaseManager:
 
     async def initialize(self):
         """Initialize database tables and open persistent connection."""
-        self._conn = await aiosqlite.connect(self.db_path)
-        await self._conn.execute('''
-            CREATE TABLE IF NOT EXISTS file_stats (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                filename TEXT NOT NULL,
-                file_size INTEGER NOT NULL,
-                upload_method TEXT NOT NULL,
-                success BOOLEAN NOT NULL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                error_message TEXT
-            )
-        ''')
-        await self._conn.commit()
+        try:
+            self._conn = await aiosqlite.connect(self.db_path)
+            await self._conn.execute('''
+                CREATE TABLE IF NOT EXISTS file_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    upload_method TEXT NOT NULL,
+                    success BOOLEAN NOT NULL,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    error_message TEXT
+                )
+            ''')
+            await self._conn.commit()
+            logger.info("Database initialized successfully", db_path=self.db_path)
+        except Exception as e:
+            logger.error("Failed to initialize database", error=str(e), db_path=self.db_path)
+            # Create a fallback in-memory database
+            try:
+                self._conn = await aiosqlite.connect(":memory:")
+                await self._conn.execute('''CREATE TABLE file_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, file_size INTEGER,
+                    upload_method TEXT, success BOOLEAN, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    error_message TEXT)''')
+                logger.warning("Using in-memory database as fallback")
+            except Exception as fallback_error:
+                logger.critical("Failed to create fallback database", error=str(fallback_error))
+                self._conn = None
 
     async def log_file_operation(self, filename: str, file_size: int, method: str,
                                  success: bool, error_msg: Optional[str] = None):
         """Log a file operation to database."""
-        async with self._conn_lock:
-            await self._conn.execute('''
-                INSERT INTO file_stats (filename, file_size, upload_method, success, error_message)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (filename, file_size, method, success, error_msg))
-            await self._conn.commit()
+        if not self._conn:
+            logger.warning("Database connection unavailable, skipping log operation", filename=filename)
+            return
+            
+        try:
+            async with self._conn_lock:
+                await self._conn.execute('''
+                    INSERT INTO file_stats (filename, file_size, upload_method, success, error_message)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (filename, file_size, method, success, error_msg))
+                await self._conn.commit()
+        except Exception as e:
+            logger.error("Failed to log file operation to database", error=str(e), filename=filename)
+            # Don't re-raise to avoid breaking the main flow
 
     async def get_statistics(self) -> dict:
         """Get bot statistics from database."""
-        async with self._conn_lock:
-            async with self._conn.execute('''
-                SELECT 
-                    COUNT(*) as total_files,
-                    SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful,
-                    SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failed,
-                    SUM(CASE WHEN success = 1 THEN file_size ELSE 0 END) as total_bytes_sent
-                FROM file_stats
-            ''') as cursor:
-                row = await cursor.fetchone()
-                return {
-                    'total_files': row[0] or 0,
-                    'successful': row[1] or 0,
-                    'failed': row[2] or 0,
-                    'total_bytes_sent': row[3] or 0
-                }
+        if not self._conn:
+            logger.warning("Database connection unavailable, returning zero statistics")
+            return {'total_files': 0, 'successful': 0, 'failed': 0, 'total_bytes_sent': 0}
+            
+        try:
+            async with self._conn_lock:
+                async with self._conn.execute('''
+                    SELECT 
+                        COUNT(*) as total_files,
+                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful,
+                        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failed,
+                        SUM(CASE WHEN success = 1 THEN file_size ELSE 0 END) as total_bytes_sent
+                    FROM file_stats
+                ''') as cursor:
+                    row = await cursor.fetchone()
+                    return {
+                        'total_files': row[0] or 0,
+                        'successful': row[1] or 0,
+                        'failed': row[2] or 0,
+                        'total_bytes_sent': row[3] or 0
+                    }
+        except Exception as e:
+            logger.error("Failed to get statistics from database", error=str(e))
+            # Return default statistics instead of crashing
+            return {'total_files': 0, 'successful': 0, 'failed': 0, 'total_bytes_sent': 0}
 
     async def close(self):
         """Close DB connection."""
-        if self._conn:
-            await self._conn.close()
+        try:
+            if self._conn:
+                await self._conn.close()
+                logger.info("Database connection closed successfully")
+        except Exception as e:
+            logger.error("Error closing database connection", error=str(e))
+        finally:
             self._conn = None
 
 
@@ -621,14 +658,21 @@ class EnhancedTelegramBot:
                 # Note: File deletion and logging will now be handled by the workers
                 logger.info("File queued for processing", filename=file_path.name, method=method)
 
+                # Log successful queuing
+                await self.db.log_file_operation(file_path.name, file_size, f"{method}_queued", True)
+
                 return success
 
             except Exception as e:
                 logger.error("File processing failed",
                              filename=file_path.name, error=str(e))
-                await self.db.log_file_operation(
-                    file_path.name, 0, "unknown", False, str(e)
-                )
+                # Safely get file size for logging
+                try:
+                    file_size = file_path.stat().st_size
+                except (FileNotFoundError, OSError):
+                    file_size = 0
+                    
+                await self.db.log_file_operation(file_path.name, file_size, "process_error", False, str(e))
                 # Don't increment counters here as this is a queue failure, not upload failure
                 return False
 
@@ -645,11 +689,27 @@ class EnhancedTelegramBot:
         async with self._bot_api_upload_semaphore:
             while attempt < max_retries:
                 try:
-                    # File will be deleted by worker after successful upload
-                    mime_type = magic.from_file(str(file_path), mime=True)
+                    # Check if file still exists
+                    if not file_path.exists():
+                        logger.error("File no longer exists", filename=file_path.name)
+                        await self.db.log_file_operation(file_path.name, 0, "bot_api", False, "File not found")
+                        return False
+                    
+                    try:
+                        file_size = file_path.stat().st_size
+                        mime_type = magic.from_file(str(file_path), mime=True)
+                    except (FileNotFoundError, OSError, PermissionError) as e:
+                        logger.error("File access error", filename=file_path.name, error=str(e))
+                        await self.db.log_file_operation(file_path.name, 0, "bot_api", False, f"File access error: {str(e)}")
+                        return False
 
-                    async with aiofiles.open(file_path, 'rb') as file:
-                        file_data = await file.read()
+                    try:
+                        async with aiofiles.open(file_path, 'rb') as file:
+                            file_data = await file.read()
+                    except (FileNotFoundError, PermissionError, OSError) as e:
+                        logger.error("Failed to read file", filename=file_path.name, error=str(e))
+                        await self.db.log_file_operation(file_path.name, file_size, "bot_api", False, f"Read error: {str(e)}")
+                        return False
 
                     if mime_type.startswith('image/'):
                         await self.bot_app.bot.send_photo(
@@ -670,6 +730,9 @@ class EnhancedTelegramBot:
                             caption=caption
                         )
 
+                    # Log successful upload
+                    await self.db.log_file_operation(file_path.name, file_size, "bot_api", True)
+                    
                     await asyncio.sleep(self._bot_api_pause)
 
                     # Delete file after successful upload
@@ -685,13 +748,22 @@ class EnhancedTelegramBot:
                 except RetryAfter as e:
                     wait_time = getattr(e, "retry_after", retry_delay)
                     logger.warning("Rate limit hit - waiting", wait_time=wait_time)
+                    await self.db.log_file_operation(file_path.name, 0, "bot_api", False, f"Rate limited, attempt {attempt + 1}")
                     await asyncio.sleep(wait_time)
                     attempt += 1
+                except TelegramError as e:
+                    logger.error("Telegram API error", error=str(e), filename=file_path.name, attempt=attempt + 1)
+                    await self.db.log_file_operation(file_path.name, 0, "bot_api", False, f"Telegram error: {str(e)}")
+                    await asyncio.sleep(retry_delay)
+                    attempt += 1
                 except Exception as e:
-                    logger.error("Upload failed", error=str(e))
+                    logger.error("Upload failed", error=str(e), filename=file_path.name, attempt=attempt + 1)
+                    await self.db.log_file_operation(file_path.name, 0, "bot_api", False, f"Upload error: {str(e)}")
                     await asyncio.sleep(retry_delay)
                     attempt += 1
 
+            # All attempts failed
+            await self.db.log_file_operation(file_path.name, 0, "bot_api", False, f"Failed after {max_retries} attempts")
             return False
 
     async def _send_via_telethon(self, file_path: Path, caption: str) -> bool:
@@ -703,12 +775,28 @@ class EnhancedTelegramBot:
         async with self._telethon_upload_semaphore:
             while attempt < max_retries:
                 try:
-                    # File will be deleted by worker after successful upload
+                     # Check if file still exists and get size
+                    if not file_path.exists():
+                        logger.error("File no longer exists", filename=file_path.name)
+                        await self.db.log_file_operation(file_path.name, 0, "telethon", False, "File not found")
+                        return False
+                        
+                    try:
+                        file_size = file_path.stat().st_size
+                    except (FileNotFoundError, OSError) as e:
+                        logger.error("File access error", filename=file_path.name, error=str(e))
+                        await self.db.log_file_operation(file_path.name, 0, "telethon", False, f"File access error: {str(e)}")
+                        return False
+                    
                     await self.telethon_client.send_file(
                         entity=self.settings.target_chat_id,
                         file=str(file_path),
                         caption=caption
                     )
+
+                    # Log successful upload
+                    await self.db.log_file_operation(file_path.name, file_size, "telethon", True)
+                    
                     await asyncio.sleep(self._telethon_pause)
 
                     # Delete file after successful upload
@@ -723,13 +811,18 @@ class EnhancedTelegramBot:
 
                 except FloodWaitError as e:
                     wait_seconds = getattr(e, "seconds", retry_delay)
+                    logger.warning("Flood wait error", wait_seconds=wait_seconds, filename=file_path.name)
+                    await self.db.log_file_operation(file_path.name, 0, "telethon", False, f"Flood wait {wait_seconds}s, attempt {attempt + 1}")
                     await asyncio.sleep(wait_seconds)
                     attempt += 1
                 except Exception as e:
-                    logger.error("Telethon upload failed", error=str(e))
+                    logger.error("Telethon upload failed", error=str(e), filename=file_path.name, attempt=attempt + 1)
+                    await self.db.log_file_operation(file_path.name, 0, "telethon", False, f"Upload error: {str(e)}")
                     await asyncio.sleep(retry_delay)
                     attempt += 1
 
+            # All attempts failed
+            await self.db.log_file_operation(file_path.name, 0, "telethon", False, f"Failed after {max_retries} attempts")
             return False
 
     def _find_media_files(self) -> List[Path]:
@@ -764,15 +857,25 @@ class EnhancedTelegramBot:
 
     def _find_recently_modified_files(self, directory: Path, time_threshold: int) -> List[Path]:
         """Find files modified within the last `time_threshold` seconds."""
+        if not directory.exists() or not directory.is_dir():
+            logger.warning("Directory does not exist or is not a directory", directory=str(directory))
+            return []
+            
         current_time = time.time()
         recent_files = []
         supported_extensions = self._get_supported_extensions()
         
-        for file_path in directory.rglob('*'):
-            if (file_path.is_file() and 
-                (current_time - file_path.stat().st_mtime) < time_threshold and
-                file_path.suffix.lower() in supported_extensions):
-                recent_files.append(file_path)
+        try:
+            for file_path in directory.rglob('*'):
+                try:
+                    if (file_path.is_file() and 
+                        (current_time - file_path.stat().st_mtime) < time_threshold and
+                        file_path.suffix.lower() in supported_extensions):
+                        recent_files.append(file_path)
+                except (OSError, PermissionError) as e:
+                    logger.warning("Error accessing file", filename=str(file_path), error=str(e))
+        except (OSError, PermissionError) as e:
+            logger.error("Error scanning directory", directory=str(directory), error=str(e))
         
         return sorted(recent_files, key=lambda x: x.stat().st_mtime, reverse=True)
 
