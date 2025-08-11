@@ -548,7 +548,7 @@ class EnhancedTelegramBot:
         Handles the /downloadig command to download a single Instagram post.
         The downloaded file is then automatically added to the bot's processing queue.
         """
-        if not context.args or not context.args[0].startswith("https://www.instagram.com/"):
+        if not context.args or "instagram.com" not in context.args[0]:
             await update.message.reply_text("Usage: /downloadig <instagram_url>")
             return
 
@@ -557,23 +557,41 @@ class EnhancedTelegramBot:
         logger.info("Received Instagram download request", url=url)
 
         try:
+            # Get files before download to compare later
+            files_before = set(self._get_all_files_in_directory(self.downloads_path))
+            
             # Run the blocking Instaloader download function in a separate thread
-            success = await asyncio.to_thread(self._download_instagram_post, url)
+            download_result = await asyncio.to_thread(self._download_instagram_post, url)
 
-            if success:
-                logger.info("Instagram download successful. Now processing...")
-                await status_msg.edit_text("✅ Download successful! The bot is now uploading the file.")
+            if download_result["success"]:
+                logger.info("Instagram download successful", downloaded_files=download_result["files"])
+                await status_msg.edit_text("✅ Download successful! Processing files...")
 
-                # Find the newly downloaded files and add them to the queue
-                newly_downloaded_files = self._find_recently_modified_files(self.downloads_path, time_threshold=300)
+                # Get files after download
+                files_after = set(self._get_all_files_in_directory(self.downloads_path))
+                newly_downloaded_files = list(files_after - files_before)
+
                 if newly_downloaded_files:
+                    logger.info("Found newly downloaded files", count=len(newly_downloaded_files), files=[f.name for f in newly_downloaded_files])
+                    processed_count = 0
                     for file_path in newly_downloaded_files:
-                        await self.process_single_file(file_path)
+                        if file_path.suffix.lower() in self._get_supported_extensions():
+                            await self.process_single_file(file_path)
+                            processed_count += 1
+                        else:
+                            logger.info("Skipping unsupported file", filename=file_path.name)
+
+                    if processed_count > 0:
+                        await status_msg.edit_text(f"✅ Download and upload complete! Processed {processed_count} files.")
+                    else:
+                        await status_msg.edit_text("✅ Download complete, but no supported media files found.")
                 else:
-                    logger.warning("Downloaded file not found after download completion.")
-                    await status_msg.edit_text("❌ Downloaded file not found. Check logs.")
+                    logger.warning("No new files found after download", 
+                                files_before=len(files_before), files_after=len(files_after))
+                    await status_msg.edit_text("❌ No new files found after download. The content may already exist or download failed.")
             else:
-                await status_msg.edit_text("❌ Download failed. Check bot logs for details.")
+                error_msg = download_result.get("error", "Unknown error")
+                await status_msg.edit_text(f"❌ Download failed: {error_msg}")
 
         except Exception as e:
             logger.exception("Unexpected error during Instagram download", error=str(e))
@@ -581,25 +599,82 @@ class EnhancedTelegramBot:
 
     def _download_instagram_post(self, url: str) -> bool:
         """Blocking Instaloader download logic to be run in a separate thread."""
-        session_name = "instaloader_session"
-        L = instaloader.Instaloader()
-
         try:
-            with contextlib.suppress(Exception):
-                L.load_session_from_file(self.settings.session_name, session_name)
-
-            shortcode = url.strip().split("/")[-2]
-            post = instaloader.Post.from_shortcode(L.context, shortcode)
-
-            L.download_post(
-                post,
-                target=self.downloads_path
+            # Initialize Instaloader with custom settings
+            L = instaloader.Instaloader(
+                download_pictures=True,
+                download_videos=True,
+                download_video_thumbnails=False,
+                download_geotags=False,
+                download_comments=False,
+                save_metadata=False,
+                compress_json=False,
+                dirname_pattern=str(self.downloads_path),
+                filename_pattern="{date_utc}_Instagram_{shortcode}",
             )
 
-            return True
+            # Try to load existing session
+            session_loaded = False
+            try:
+                # First try with username if available
+                if hasattr(self.settings, 'instagram_username') and self.settings.instagram_username:
+                    L.load_session_from_file(self.settings.instagram_username)
+                    session_loaded = True
+                    logger.info("Loaded Instagram session", username=self.settings.instagram_username)
+                else:
+                    # Try to find any available session file
+                    import glob
+                    session_files = glob.glob(os.path.expanduser("~/.config/instaloader/session-*"))
+                    if session_files:
+                        # Use the most recent session file
+                        latest_session = max(session_files, key=os.path.getmtime)
+                        username = os.path.basename(latest_session).replace('session-', '')
+                        L.load_session_from_file(username)
+                        session_loaded = True
+                        logger.info("Loaded Instagram session from latest file", username=username)
+            except Exception as e:
+                logger.warning("Could not load Instagram session", error=str(e))
+                session_loaded = False
+            
+            # Extract shortcode from URL
+            import re
+            shortcode_match = re.search(r'/p/([A-Za-z0-9_-]+)/', url)
+            if not shortcode_match:
+                shortcode_match = re.search(r'/reel/([A-Za-z0-9_-]+)/', url)
+            
+            if not shortcode_match:
+                return {"success": False, "error": "Could not extract shortcode from URL", "files": []}
+ 
+
+            shortcode = shortcode_match.group(1)
+            logger.info("Extracted shortcode", shortcode=shortcode)
+            post = instaloader.Post.from_shortcode(L.context, shortcode)
+
+            # Get files before download for comparison
+            files_before = self._get_all_files_in_directory(self.downloads_path)
+
+            # Download the post
+            L.download_post(post, target="")  # Empty string uses dirname_pattern
+            
+            # Get files after download
+            files_after = self._get_all_files_in_directory(self.downloads_path)
+            new_files = list(set(files_after) - set(files_before))
+
+            return {"success": True, "error": None, "files": new_files}
         except Exception as e:
             logger.error("Instaloader download failed", error=str(e), url=url)
-            return False
+            return {"success": False, "error": str(e), "files": []}
+
+    def _get_all_files_in_directory(self, directory: Path) -> List[Path]:
+        """Get all files in directory recursively."""
+        files = []
+        try:
+            for file_path in directory.rglob('*'):
+                if file_path.is_file():
+                    files.append(file_path)
+        except (OSError, PermissionError) as e:
+            logger.warning("Error scanning directory", directory=str(directory), error=str(e))
+        return files
 
     async def _bot_api_worker(self):
         """Worker for Bot API uploads with file counting."""
