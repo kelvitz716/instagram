@@ -543,6 +543,33 @@ class EnhancedTelegramBot:
         async with self._single_file_counter_lock:
             self._single_file_counter = 0
 
+    def _validate_instagram_url(self, url: str) -> tuple[bool, str, str]:
+        """Validate Instagram URL and extract information."""
+        try:
+            import re
+            
+            # Normalize URL
+            if not url.startswith('http'):
+                url = 'https://' + url
+            
+            # Extract shortcode and determine type
+            post_match = re.search(r'/p/([A-Za-z0-9_-]+)/', url)
+            reel_match = re.search(r'/reel/([A-Za-z0-9_-]+)/', url)
+            story_match = re.search(r'/stories/([^/]+)/([0-9]+)/', url)
+            
+            if post_match:
+                return True, post_match.group(1), 'post'
+            elif reel_match:
+                return True, reel_match.group(1), 'reel'
+            elif story_match:
+                return True, story_match.group(2), 'story'
+            else:
+                return False, "", 'unknown'
+                
+        except Exception as e:
+            logger.error("URL validation failed", error=str(e), url=url)
+            return False, "", 'error'
+
     async def handle_download_instagram(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         Handles the /downloadig command to download Instagram content with enhanced progress tracking.
@@ -553,14 +580,21 @@ class EnhancedTelegramBot:
             return
 
         url = context.args[0]
+
+        # Validate URL first
+        is_valid, shortcode, detected_type = self._validate_instagram_url(url)
+        if not is_valid:
+            await update.message.reply_text("❌ Invalid Instagram URL format")
+            return
+            
         status_msg = await update.message.reply_text(f"⏳ Starting download for: `{url}`")
-        logger.info("Received Instagram download request", url=url)
+        logger.info("Received Instagram download request", url=url, shortcode=shortcode, type=detected_type)
 
         try:
             # Get files before download to compare later
             files_before = set(self._get_all_files_in_directory(self.downloads_path))
-            # Determine content type from URL for better messaging
-            content_type = self._determine_instagram_content_type(url)          
+            # Use detected type from validation
+            content_type = detected_type if detected_type != 'unknown' else self._determine_instagram_content_type(url)         
             
             # Run the blocking Instaloader download function in a separate thread
             download_result = await asyncio.to_thread(self._download_instagram_post, url, content_type)
@@ -798,7 +832,7 @@ class EnhancedTelegramBot:
                 save_metadata=False,
                 compress_json=False,
                 dirname_pattern=str(self.downloads_path),
-                filename_pattern="{date_utc}_Instagram_{shortcode}_{media_id}",
+                filename_pattern="{date_utc}_Instagram_{shortcode}",
             )
 
             # Try to load existing session
@@ -841,14 +875,27 @@ class EnhancedTelegramBot:
             # Get files before download for comparison
             files_before = self._get_all_files_in_directory(self.downloads_path)
 
-            # Count expected media items (for carousels/multi-media posts)
+            # Detect if this is a carousel post
             expected_media_count = 1
+            is_carousel = False
             try:
+                 # Check if post has multiple media items (carousel)
                 if hasattr(post, 'get_sidecar_nodes'):
-                    sidecar_nodes = list(post.get_sidecar_nodes())
-                    if sidecar_nodes:
-                        expected_media_count = len(sidecar_nodes)
-                        logger.info("Detected carousel post", media_count=expected_media_count)
+                    try:
+                        sidecar_nodes = list(post.get_sidecar_nodes())
+                        if sidecar_nodes:
+                            expected_media_count = len(sidecar_nodes)
+                            is_carousel = True
+                            logger.info("Detected carousel post", media_count=expected_media_count)
+                    except Exception:
+                        # If sidecar nodes fail, check typename
+                        pass
+                
+                # Alternative method: check post typename
+                if hasattr(post, 'typename') and post.typename == 'GraphSidecar':
+                    is_carousel = True
+                    logger.info("Detected carousel via typename")
+                    logger.info("Detected carousel post", media_count=expected_media_count)
             except Exception as e:
                 logger.warning("Could not detect carousel items", error=str(e))
 
@@ -861,10 +908,14 @@ class EnhancedTelegramBot:
 
             # Update content type based on what we actually downloaded
             actual_content_type = content_type
-            if len(new_files) > 1:
+            if len(new_files) > 1 or is_carousel:
                 actual_content_type = "carousel"
             elif content_type == "post" and any("video" in str(f).lower() for f in new_files):
                 actual_content_type = "reel"
+
+            # If we detected carousel but only got one file, it might be a video carousel
+            if is_carousel and len(new_files) == 1:
+                actual_content_type = "carousel"
 
             return {
                 "success": True, 
