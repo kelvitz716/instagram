@@ -250,6 +250,11 @@ class EnhancedTelegramBot:
         self._total_media_count: int = 0
         self._active_uploads: int = 0
 
+        # File numbering for single file processing
+        self._single_file_counter: int = 0
+        self._single_file_counter_lock = asyncio.Lock()
+
+
         # Pauses (seconds) between uploads to respect rate limits
         self._bot_api_pause = float(self.settings.bot_api_pause_seconds)
         self._telethon_pause = float(self.settings.telethon_pause_seconds)
@@ -284,6 +289,7 @@ class EnhancedTelegramBot:
         # Setup file watcher with proper event loop
         self.loop = asyncio.get_running_loop()
         event_handler = FileWatcher(self.process_single_file, self.loop)
+        self._single_file_counter_lock = asyncio.Lock()  # Reinitialize the lock with proper event loop
         self.observer = Observer()
         self.observer.schedule(event_handler, str(self.downloads_path), recursive=True)
 
@@ -426,6 +432,17 @@ class EnhancedTelegramBot:
         )
         await status_msg.edit_text(final_message)
 
+    async def _get_next_file_number(self) -> int:
+        """Thread-safe method to get the next file number for single file processing."""
+        async with self._single_file_counter_lock:
+            self._single_file_counter += 1
+            return self._single_file_counter
+
+    async def _reset_single_file_counter(self):
+        """Reset the single file counter (useful for batch operations)."""
+        async with self._single_file_counter_lock:
+            self._single_file_counter = 0
+
     async def handle_download_instagram(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         Handles the /downloadig command to download a single Instagram post.
@@ -540,36 +557,31 @@ class EnhancedTelegramBot:
         async with self.throttler:
             try:
                 file_size = file_path.stat().st_size
+
+                # Get file number and total count for queue consistency
+                file_number = await self._get_next_file_number()
+                total_files = self._total_media_count or 1
+                
                 logger.info("Processing file",
-                            progress=f"{self._completed_count + 1}/{self._total_media_count}",
+                            progress=f"{file_number}/{total_files}",
                             filename=file_path.name,
                             size=self._format_bytes(file_size))
 
                 # Determine upload method
-                caption = f"Media File from watcher"
+                caption = f"Media File ({file_number}/{total_files})"
                 if file_size <= self.settings.large_file_threshold:
                     logger.info("Using Bot API (<= threshold)", threshold=self._format_bytes(self.settings.large_file_threshold))
-                    success = await self._send_via_bot_api(file_path, caption)
+                    await self.bot_api_queue.put((file_path, file_number, total_files))
+                    success = True  # Queue operation success
                     method = "bot_api"
                 else:
                     logger.info("Using Telethon (> threshold)", threshold=self._format_bytes(self.settings.large_file_threshold))
-                    success = await self._send_via_telethon(file_path, caption)
+                    await self.telethon_queue.put((file_path, file_number, total_files))
+                    success = True  # Queue operation success
                     method = "telethon"
 
-                # --- MODIFIED LOGIC: Deletion moved here ---
-                if file_path.exists():
-                    try:
-                        await asyncio.to_thread(file_path.unlink)
-                        logger.info("Deleted file after successful upload", filename=file_path.name)
-                    except Exception as e:
-                        logger.warning("Failed to delete file after upload", filename=file_path.name, error=str(e))
-                # ----------------------------------------
-
-                await self.db.log_file_operation(file_path.name, file_size, method, "success")
-
-                # increment completed counter for any file processed by process_single_file
-                self._completed_count += 1
-                self._current_upload_count += 1
+                # Note: File deletion and logging will now be handled by the workers
+                logger.info("File queued for processing", filename=file_path.name, method=method)
 
                 return success
 
@@ -579,6 +591,7 @@ class EnhancedTelegramBot:
                 await self.db.log_file_operation(
                     file_path.name, 0, "unknown", False, str(e)
                 )
+                # Don't increment counters here as this is a queue failure, not upload failure
                 return False
 
     async def _send_via_bot_api(self, file_path: Path, caption: str) -> bool:
@@ -594,6 +607,7 @@ class EnhancedTelegramBot:
         async with self._bot_api_upload_semaphore:
             while attempt < max_retries:
                 try:
+                    # File will be deleted by worker after successful upload
                     mime_type = magic.from_file(str(file_path), mime=True)
 
                     async with aiofiles.open(file_path, 'rb') as file:
@@ -619,6 +633,15 @@ class EnhancedTelegramBot:
                         )
 
                     await asyncio.sleep(self._bot_api_pause)
+
+                    # Delete file after successful upload
+                    if file_path.exists():
+                        try:
+                            await asyncio.to_thread(file_path.unlink)
+                            logger.info("Deleted file after successful upload", filename=file_path.name)
+                        except Exception as e:
+                            logger.warning("Failed to delete file after upload", filename=file_path.name, error=str(e))
+                    
                     return True
 
                 except RetryAfter as e:
@@ -642,12 +665,22 @@ class EnhancedTelegramBot:
         async with self._telethon_upload_semaphore:
             while attempt < max_retries:
                 try:
+                    # File will be deleted by worker after successful upload
                     await self.telethon_client.send_file(
                         entity=self.settings.target_chat_id,
                         file=str(file_path),
                         caption=caption
                     )
                     await asyncio.sleep(self._telethon_pause)
+
+                    # Delete file after successful upload
+                    if file_path.exists():
+                        try:
+                            await asyncio.to_thread(file_path.unlink)
+                            logger.info("Deleted file after successful upload", filename=file_path.name)
+                        except Exception as e:
+                            logger.warning("Failed to delete file after upload", filename=file_path.name, error=str(e))
+                    
                     return True
 
                 except FloodWaitError as e:
