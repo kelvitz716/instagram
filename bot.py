@@ -4,6 +4,7 @@ Enhanced Telegram Bot with third-party libraries for better efficiency and maint
 """
 
 import asyncio
+import sqlite3
 import sys
 import os
 import logging
@@ -13,6 +14,8 @@ from typing import Optional, List
 import contextlib
 import threading
 import time
+import tempfile
+import shutil
 
 # Third-party imports for enhanced functionality
 from pydantic_settings import BaseSettings
@@ -898,104 +901,201 @@ class EnhancedTelegramBot:
                 "Please try again or check the logs for details.",
                 parse_mode='Markdown'
             )
+    def _get_firefox_cookie_file_path(self, firefox_profile: Optional[str] = None) -> Optional[str]:
+        """
+        Get the path to Firefox cookies.sqlite file.
+        """
+        from platform import system
+        from glob import glob
+        from pathlib import Path
+        
+        system_name = system()
+        home_dir = Path.home()
+        
+        if firefox_profile:
+            # Custom profile specified
+            if self.settings.firefox_cookies_path and os.path.exists(self.settings.firefox_cookies_path):
+                return self.settings.firefox_cookies_path
+            
+            # Standard profile paths
+            if system_name == "Windows":
+                pattern = f"~/AppData/Roaming/Mozilla/Firefox/Profiles/{firefox_profile}/cookies.sqlite"
+            elif system_name == "Darwin":
+                pattern = f"~/Library/Application Support/Firefox/Profiles/{firefox_profile}/cookies.sqlite"
+            else:
+                patterns = [
+                    f"~/.mozilla/firefox/{firefox_profile}/cookies.sqlite",
+                    f"~/snap/firefox/common/.mozilla/firefox/{firefox_profile}/cookies.sqlite",
+                    f"~/.var/app/org.mozilla.firefox/.mozilla/firefox/{firefox_profile}/cookies.sqlite"
+                ]
+                for pattern in patterns:
+                    expanded = os.path.expanduser(pattern)
+                    if os.path.exists(expanded):
+                        return expanded
+                return None
+        else:
+            # Find default profile
+            if system_name == "Windows":
+                pattern = "~/AppData/Roaming/Mozilla/Firefox/Profiles/*/cookies.sqlite"
+            elif system_name == "Darwin":
+                pattern = "~/Library/Application Support/Firefox/Profiles/*/cookies.sqlite"
+            else:
+                patterns = [
+                    "~/.mozilla/firefox/*/cookies.sqlite",
+                    "~/snap/firefox/common/.mozilla/firefox/*/cookies.sqlite",
+                    "~/.var/app/org.mozilla.firefox/.mozilla/firefox/*/cookies.sqlite"
+                ]
+                for pattern in patterns:
+                    expanded = os.path.expanduser(pattern)
+                    cookiefiles = glob(expanded)
+                    if cookiefiles:
+                        return max(cookiefiles, key=os.path.getmtime)  # Most recent
+                return None
+        
+        expanded = os.path.expanduser(pattern)
+        cookiefiles = glob(expanded)
+        return max(cookiefiles, key=os.path.getmtime) if cookiefiles else None
+
+    def _import_session_from_firefox(self, username: str, cookiefile: str) -> bool:
+        """
+        Import session from Firefox cookies using the official Instaloader method.
+        Based on: https://github.com/instaloader/instaloader/blob/master/docs/codesnippets/615_import_firefox_session.py
+        """
+        try:
+            # Create temporary Instaloader instance
+            L = instaloader.Instaloader()
+            
+            # Connect to Firefox cookie database
+            with sqlite3.connect(f"file:{cookiefile}?mode=ro", uri=True) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                
+                # Query Instagram cookies from Firefox database
+                cursor.execute(
+                    "SELECT name, value FROM moz_cookies WHERE baseDomain='instagram.com'"
+                )
+                
+                instagram_cookies = cursor.fetchall()
+                
+                if not instagram_cookies:
+                    logger.warning("No Instagram cookies found in Firefox")
+                    return False
+                
+                # Import cookies into Instaloader session
+                for cookie in instagram_cookies:
+                    L.context._session.cookies.set(
+                        cookie['name'], 
+                        cookie['value'], 
+                        domain='instagram.com'
+                    )
+                
+                logger.info(f"Imported {len(instagram_cookies)} Instagram cookies from Firefox")
+                
+                # Test the session by getting username info
+                try:
+                    # This will validate the session
+                    profile = instaloader.Profile.from_username(L.context, username)
+                    logger.info(f"Successfully validated session for user: {username}")
+                    
+                    # Save the session
+                    L.save_session_to_file(username)
+                    return True
+                    
+                except Exception as test_error:
+                    logger.error(f"Session validation failed: {test_error}")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Failed to import Firefox session: {e}")
+            return False
+
+    def _try_browser_cookie3_method(self, username: str) -> bool:
+        """
+        Try using browser_cookie3 library as alternative method.
+         """
+        try:
+            try:
+                import browser_cookie3
+            except ImportError:
+                logger.info("browser_cookie3 not installed, skipping alternative method")
+                return False
+            
+            # Create Instaloader instance
+            L = instaloader.Instaloader()
+            
+            # Get Instagram cookies from Firefox using browser_cookie3
+            firefox_cookies = browser_cookie3.firefox(domain_name='instagram.com')
+            
+            cookie_count = 0
+            for cookie in firefox_cookies:
+                L.context._session.cookies.set(
+                    cookie.name, 
+                    cookie.value, 
+                    domain='instagram.com'
+                )
+                cookie_count += 1
+            
+            if cookie_count == 0:
+                logger.warning("No Instagram cookies found via browser_cookie3")
+                return False
+            
+            logger.info(f"Imported {cookie_count} Instagram cookies via browser_cookie3")
+            
+            # Test and save session
+            try:
+                profile = instaloader.Profile.from_username(L.context, username)
+                L.save_session_to_file(username)
+                logger.info(f"Successfully validated session for user: {username}")
+                return True
+            except Exception as test_error:
+                logger.error(f"Session validation failed: {test_error}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"browser_cookie3 method failed: {e}")
+            return False
+
     def _login_with_firefox_cookies(self, username: str, firefox_profile: Optional[str] = None) -> dict:
         """
         Login to Instagram using Firefox cookies.
         This is a blocking function to be run in a separate thread.
         """
         try:
-            import tempfile
-            import shutil
-            from pathlib import Path
+            logger.info("Attempting to login with Firefox cookies", username=username, profile=firefox_profile)
             
-            # Create a temporary Instaloader instance for login
-            temp_dir = tempfile.mkdtemp()
-            temp_session_file = os.path.join(temp_dir, f"session-{username}")
+            # Method 1: Try direct Firefox cookie database access (official method)
+            cookiefile = self._get_firefox_cookie_file_path(firefox_profile)
+            if cookiefile and os.path.exists(cookiefile):
+                logger.info("Found Firefox cookie file", path=cookiefile)
+                if self._import_session_from_firefox(username, cookiefile):
+                    return {
+                        "success": True,
+                        "username": username,
+                        "user_id": None,
+                        "session_file": f"session-{username}",
+                        "error": None,
+                        "method": "firefox_sqlite"
+                    }
+            else:
+                logger.warning("Firefox cookie file not found", profile=firefox_profile)
             
-            try:
-                # Initialize Instaloader for login
-                L = instaloader.Instaloader(
-                    dirname_pattern=temp_dir,
-                    filename_pattern="temp_{shortcode}",
-                    download_pictures=False,
-                    download_videos=False,
-                    download_video_thumbnails=False,
-                    download_geotags=False,
-                    download_comments=False,
-                    save_metadata=False,
-                    compress_json=False,
-                )
-                
-                logger.info("Loading Instagram cookies from Firefox", username=username, profile=firefox_profile)
-                
-                # Determine Firefox profile path
-                if firefox_profile:
-                    # Custom profile specified
-                    if self.settings.firefox_cookies_path:
-                        # Use custom path from settings
-                        cookies_path = self.settings.firefox_cookies_path
-                    else:
-                        # Try standard Firefox profile paths
-                        home_dir = Path.home()
-                        possible_paths = [
-                            home_dir / ".mozilla" / "firefox" / firefox_profile / "cookies.sqlite",
-                            home_dir / "snap" / "firefox" / "common" / ".mozilla" / "firefox" / firefox_profile / "cookies.sqlite",
-                            home_dir / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox" / firefox_profile / "cookies.sqlite"
-                        ]
-                        cookies_path = None
-                        for path in possible_paths:
-                            if path.exists():
-                                cookies_path = str(path)
-                                break
-                else:
-                    cookies_path = None
-                
-                # Load cookies using different methods
-                if cookies_path and os.path.exists(cookies_path):
-                    logger.info("Using custom Firefox cookies path", path=cookies_path)
-                    # For custom paths, we need to handle this differently
-                    # This would require additional implementation for direct cookie file reading
-                    L.load_session_from_file(username, filename=cookies_path)
-                else:
-                    # Use Instaloader's built-in Firefox cookie loading
-                    logger.info("Using Instaloader's Firefox cookie loading")
-                    
-                    # Import cookies from Firefox
-                    L.context._session.cookies.update(L.context._get_firefox_cookies())
-                    
-                    # Try to get user info to validate login
-                    profile = instaloader.Profile.from_username(L.context, username)
-                    
-                    # Save session if successful
-                    L.save_session_to_file(username)
-                    
-                    logger.info("Firefox cookies loaded successfully", 
-                              username=username, 
-                              user_id=profile.userid if hasattr(profile, 'userid') else 'N/A')
-                
-                # Copy session file to proper location
-                session_dir = Path.home() / ".config" / "instaloader"
-                session_dir.mkdir(parents=True, exist_ok=True)
-                final_session_file = session_dir / f"session-{username}"
-                
-                if os.path.exists(temp_session_file):
-                    shutil.copy2(temp_session_file, final_session_file)
-                    logger.info("Session file saved", path=str(final_session_file))
-                
+            # Method 2: Try browser_cookie3 as fallback
+            logger.info("Trying browser_cookie3 as fallback method")
+            if self._try_browser_cookie3_method(username):
                 return {
                     "success": True,
                     "username": username,
-                    "user_id": getattr(profile, 'userid', None) if 'profile' in locals() else None,
-                    "session_file": str(final_session_file),
-                    "error": None
+                    "user_id": None,
+                    "session_file": f"session-{username}",
+                    "error": None,
+                    "method": "browser_cookie3"
                 }
-                
-            finally:
-                # Clean up temporary directory
-                try:
-                    shutil.rmtree(temp_dir)
-                except Exception as cleanup_error:
-                    logger.warning("Failed to clean up temp directory", error=str(cleanup_error))
+            
+            return {
+                "success": False,
+                "error": "Could not find or import Firefox cookies. Make sure you're logged into Instagram on Firefox and the browser is closed.",
+                "username": username
+            }
                 
         except instaloader.exceptions.BadCredentialsException:
             return {
@@ -1016,33 +1116,7 @@ class EnhancedTelegramBot:
                 "error": str(e),
                 "username": username
             }
-    def _get_firefox_cookies_direct(self) -> dict:
-        """
-        Alternative method to load Firefox cookies directly from SQLite database.
-        This method provides more control over cookie extraction.
-        """
-        try:
-            import sqlite3
-            import browser_cookie3
-            from urllib.parse import urlparse
-            
-            # Use browser_cookie3 library for more reliable cookie extraction
-            cookies = browser_cookie3.firefox(domain_name='instagram.com')
-            
-            cookie_dict = {}
-            for cookie in cookies:
-                cookie_dict[cookie.name] = cookie.value
-            
-            logger.info("Firefox cookies extracted", count=len(cookie_dict))
-            return cookie_dict
-            
-        except ImportError:
-            logger.warning("browser_cookie3 not installed, falling back to instaloader method")
-            return {}
-        except Exception as e:
-            logger.error("Failed to extract Firefox cookies directly", error=str(e))
-            return {}
-
+    
     def _download_instagram_post(self, url: str, content_type: str = "post") -> dict:
         """Blocking Instaloader download logic to be run in a separate thread."""
         try:
