@@ -311,6 +311,7 @@ class EnhancedTelegramBot:
         # Tracking counters for progress and active uploads
         self._completed_count: int = 0
         self._total_to_process: int = 0
+        self._failed_count: int = 0
         self._current_upload_count: int = 0
         self._total_media_count: int = 0
         self._active_uploads: int = 0
@@ -318,6 +319,11 @@ class EnhancedTelegramBot:
         # File numbering for single file processing
         self._single_file_counter: int = 0
         self._single_file_counter_lock = asyncio.Lock()
+         
+        # Pauses (seconds) between uploads to respect rate limits
+        self._bot_api_pause = float(self.settings.bot_api_pause_seconds)
+        self._telethon_pause = float(self.settings.telethon_pause_seconds)
+        self._batch_size = int(self.settings.batch_size)
 
     async def _increment_completed(self):
         """Thread-safe increment of completed counter."""
@@ -350,11 +356,6 @@ class EnhancedTelegramBot:
             self._completed_count = 0
             self._failed_count = 0
             self._active_uploads = 0
-
-        # Pauses (seconds) between uploads to respect rate limits
-        self._bot_api_pause = float(self.settings.bot_api_pause_seconds)
-        self._telethon_pause = float(self.settings.telethon_pause_seconds)
-        self._batch_size = int(self.settings.batch_size)
 
     async def initialize(self):
         """Initialize all bot components."""
