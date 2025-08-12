@@ -329,6 +329,10 @@ class EnhancedTelegramBot:
         self._current_upload_count: int = 0
         self._total_media_count: int = 0
         self._active_uploads: int = 0
+           
+        # Status message tracking
+        self._last_status_update = 0.0
+        self._status_update_interval = float(self.settings.status_update_interval)
 
         # File numbering for single file processing
         self._single_file_counter: int = 0
@@ -565,6 +569,10 @@ class EnhancedTelegramBot:
             return
 
         total_files = len(files)
+        if total_files == 0:
+            await update.message.reply_text("📂 No media files found")
+            return
+          
         status_msg = await update.message.reply_text(
             f"🔍 Found {total_files} files. Processing in batches of {self._batch_size}..."
         )
@@ -572,6 +580,9 @@ class EnhancedTelegramBot:
         # Add initial delay to avoid immediate rate limiting
         await asyncio.sleep(1.0)
 
+        # Update total media count for workers
+        self._total_media_count = total_files
+        
         # Reset counters safely
         await self._reset_counters()
         current_batch = 1
@@ -595,6 +606,7 @@ class EnhancedTelegramBot:
                     file_size = file_path.stat().st_size
                     file_number = i + idx
 
+                    # Queue the file with proper tuple format
                     if file_size <= self.settings.large_file_threshold:
                         await self.bot_api_queue.put((file_path, file_number, total_files))
                     else:
@@ -604,15 +616,31 @@ class EnhancedTelegramBot:
                     logger.warning("File disappeared", filename=file_path.name)
                     await self._increment_failed()
 
-            # Wait for current batch to complete
+            # Monitor batch progress with timeout
+            batch_timeout = 300  # 5 minutes per batch
+            batch_start_time = time.time()
+            last_progress_update = 0
+            
             completed, failed, active = await self._get_counters()
-            while (not self.bot_api_queue.empty() or
-                not self.telethon_queue.empty() or
-                active > 0):
+            while ((not self.bot_api_queue.empty() or 
+                    not self.telethon_queue.empty() or 
+                    active > 0) and 
+                   (time.time() - batch_start_time) < batch_timeout):
+                
                 await asyncio.sleep(1)
                 completed, failed, active = await self._get_counters()
 
+                # Update progress every 10 seconds
+                if time.time() - last_progress_update > 10:
+                    await self._update_batch_status(status_msg, current_batch, total_batches, 
+                                                   completed, failed, active, total_files)
+                    last_progress_update = time.time()
+
             current_batch += 1
+
+            # Brief pause between batches
+            if current_batch <= total_batches:
+                await asyncio.sleep(2)
 
         # Final summary
         completed, failed, active = await self._get_counters()
@@ -626,6 +654,30 @@ class EnhancedTelegramBot:
             f"• Success rate: {success_rate:.1f}%"
         )
         await self._safe_edit_message(status_msg, final_summary)
+       
+    async def _update_batch_status(self, status_msg, current_batch: int, total_batches: int, 
+                                   completed: int, failed: int, active: int, total_files: int):
+        """Update batch processing status with rate limiting."""
+        current_time = time.time()
+        if current_time - self._last_status_update < self._status_update_interval:
+            return
+            
+        try:
+            remaining_queue = self.bot_api_queue.qsize() + self.telethon_queue.qsize()
+            progress_text = (
+                f"📤 Processing Batch {current_batch}/{total_batches}\n"
+                f"• Total files: {total_files}\n"
+                f"• Completed: {completed}/{total_files}\n"
+                f"• Failed: {failed}\n"
+                f"• Active uploads: {active}\n"
+                f"• Queue remaining: {remaining_queue}"
+            )
+            
+            success = await self._safe_edit_message(status_msg, progress_text)
+            if success:
+                self._last_status_update = current_time
+        except Exception as e:
+            logger.warning("Failed to update batch status", error=str(e))
 
     async def _get_next_file_number(self) -> int:
         """Thread-safe method to get the next file number for single file processing."""
@@ -1830,18 +1882,32 @@ class EnhancedTelegramBot:
     async def _bot_api_worker(self):
         """Worker for Bot API uploads with file counting."""
         logger.info("Bot API worker started")
+
         while True:
-            file_path, file_number, total_files = await self.bot_api_queue.get()
+            try:
+                item = await self.bot_api_queue.get()
+                file_path, file_number, total_files = item
+            except ValueError as e:
+                logger.error("Bot API worker received malformed queue item", error=str(e))
+                self.bot_api_queue.task_done()
+                continue
+                
             try:
                 await self._increment_active_uploads()
 
                 caption = f"Media File ({file_number}/{total_files})"
+                logger.info("Bot API worker processing file", 
+                           filename=file_path.name, 
+                           progress=f"{file_number}/{total_files}")
+                
                 success = await self._send_via_bot_api(file_path, caption)
 
                 if success:
                     await self._increment_completed()
+                    logger.info("Bot API upload completed successfully", filename=file_path.name)
                 else:
                     await self._increment_failed()
+                    logger.warning("Bot API upload failed", filename=file_path.name)
 
             except Exception as e:
                 logger.exception("Bot API worker error", error=str(e), filename=file_path.name)
@@ -1854,17 +1920,31 @@ class EnhancedTelegramBot:
         """Worker for Telethon uploads with file counting."""
         logger.info("Telethon worker started")
         while True:
-            file_path, file_number, total_files = await self.telethon_queue.get()
+            try:
+                item = await self.telethon_queue.get()
+                file_path, file_number, total_files = item
+            except ValueError as e:
+                logger.error("Telethon worker received malformed queue item", error=str(e))
+                self.telethon_queue.task_done()
+                continue
+                
             try:
                 await self._increment_active_uploads()
 
                 caption = f"Media File ({file_number}/{total_files})"
+                logger.info("Telethon worker processing file", 
+                           filename=file_path.name, 
+                           progress=f"{file_number}/{total_files}",
+                           size=self._format_bytes(file_path.stat().st_size))
+                
                 success = await self._send_via_telethon(file_path, caption)
 
                 if success:
                     await self._increment_completed()
+                    logger.info("Telethon upload completed successfully", filename=file_path.name)
                 else:
                     await self._increment_failed()
+                    logger.warning("Telethon upload failed", filename=file_path.name)
 
             except Exception as e:
                 logger.exception("Telethon worker error", error=str(e), filename=file_path.name)
@@ -2034,6 +2114,10 @@ class EnhancedTelegramBot:
                 except Exception as e:
                     logger.error("Upload failed", error=str(e), filename=file_path.name, attempt=attempt + 1)
                     await self.db.log_file_operation(file_path.name, 0, "bot_api", False, f"Upload error: {str(e)}")
+
+                    # Exponential backoff for retries
+                    retry_delay = min(30, retry_delay * 1.5)
+                    
                     await asyncio.sleep(retry_delay)
                     attempt += 1
 
@@ -2101,6 +2185,10 @@ class EnhancedTelegramBot:
                 except Exception as e:
                     logger.error("Telethon upload failed", error=str(e), filename=file_path.name, attempt=attempt + 1)
                     await self.db.log_file_operation(file_path.name, 0, "telethon", False, f"Upload error: {str(e)}")
+
+                    # Exponential backoff for retries
+                    retry_delay = min(60, retry_delay * 1.5)
+                    
                     await asyncio.sleep(retry_delay)
                     attempt += 1
 
@@ -2241,8 +2329,18 @@ class EnhancedTelegramBot:
         # Stop Instagram retry worker
         if self._instagram_retry_worker_task and not self._instagram_retry_worker_task.done():
             self._instagram_retry_worker_task.cancel()
+               
+        # Cancel worker tasks
+        if self._bot_api_worker_task and not self._bot_api_worker_task.done():
+            self._bot_api_worker_task.cancel()
+        if self._telethon_worker_task and not self._telethon_worker_task.done():
+            self._telethon_worker_task.cancel()
             try:
                 await self._instagram_retry_worker_task
+                if self._bot_api_worker_task:
+                    await self._bot_api_worker_task
+                if self._telethon_worker_task:
+                    await self._telethon_worker_task
             except asyncio.CancelledError:
                 pass
         
