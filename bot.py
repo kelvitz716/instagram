@@ -342,6 +342,12 @@ class EnhancedTelegramBot:
         # Instagram upload retry mechanism
         self._instagram_retry_queue: "asyncio.Queue[tuple[Path, str, int, int]]" = asyncio.Queue()
         self._instagram_retry_worker_task: Optional[asyncio.Task] = None
+
+        # Progress tracking for large file uploads
+        self._upload_progress_messages: dict[str, any] = {}  # file_path -> message
+        self._progress_lock = asyncio.Lock()
+        self._current_file_progress: dict[str, dict] = {}  # file_path -> progress info
+        
         self._max_instagram_retries = 3
         self._instagram_retry_delay = 30  # Base delay in seconds
          
@@ -355,6 +361,26 @@ class EnhancedTelegramBot:
         self._message_window_start = 0.0
         self._max_messages_per_minute = 20  # Conservative limit
         self._batch_size = int(self.settings.batch_size)
+
+    def _generate_enhanced_caption(self, file_path: Path, file_number: int, total_files: int, 
+                                 file_size: int, content_type: str = "media") -> str:
+        """Generate enhanced caption with file metadata."""
+        size_str = self._format_bytes(file_size)
+        
+        # Detect file type for better description
+        mime_type = magic.from_file(str(file_path), mime=True)
+        if mime_type.startswith('image/'):
+            type_icon = "🖼️"
+            type_name = "Image"
+        elif mime_type.startswith('video/'):
+            type_icon = "🎥"
+            type_name = "Video"
+        else:
+            type_icon = "📄"
+            type_name = "Document"
+        
+        return f"{type_icon} {type_name} ({file_number}/{total_files}) | {size_str}"
+
 
     async def _increment_completed(self):
         """Thread-safe increment of completed counter."""
@@ -444,6 +470,15 @@ class EnhancedTelegramBot:
                 await asyncio.sleep(self.settings.message_edit_retry_delay)
         
         return False
+
+    async def _safe_send_message_with_response(self, chat_id: int, text: str, parse_mode: str = None):
+        """Send a message and return the message object for editing."""
+        try:
+            await self._rate_limit_check()
+            return await self.bot_app.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+        except Exception as e:
+            logger.error("Failed to send message with response", error=str(e))
+            return None
 
     async def initialize(self):
         """Initialize all bot components."""
@@ -796,23 +831,45 @@ class EnhancedTelegramBot:
                         retry_files = []
                         successful_uploads = 0
 
+                        # Send initial batch notification
+                        batch_msg = await self._safe_send_message_with_response(
+                            self.settings.target_chat_id, 
+                            f"📤 Starting upload of {len(media_files)} {content_type_plural}..."
+                        )
+
                         for i, file_path in enumerate(media_files, 1):
                             try:
-                                # Send individual progress message
-                                progress_msg = f"Instagram {content_type} ({i}/{len(media_files)})"
+                                file_size = file_path.stat().st_size
+                                enhanced_caption = self._generate_enhanced_caption(
+                                    file_path, i, len(media_files), file_size, content_type
+                                )
+                                
+                                # Update batch progress
+                                if batch_msg:
+                                    await self._safe_edit_message(
+                                        batch_msg,
+                                        f"📤 Uploading {content_type_plural}...\n"
+                                        f"Progress: {i}/{len(media_files)}\n"
+                                        f"Current: {file_path.name}"
+                                    )
                                 
                                 # Process the file
-                                success = await self._process_instagram_media_file(file_path, progress_msg, i, len(media_files), content_type, retry_count=0)
+                                success = await self._process_instagram_media_file(
+                                    file_path, enhanced_caption, i, len(media_files), content_type, retry_count=0
+                                )
                                 
                                 if success:
                                     successful_uploads += 1
                                     
                                     # Send individual success notification to target chat with rate limiting
-                                    await self._safe_send_message(self.settings.target_chat_id, progress_msg)                                 
+                                    await self._safe_send_message(
+                                        self.settings.target_chat_id, 
+                                        f"✅ {enhanced_caption}"
+                                    )                                
                                 
                                 else:
                                     # Add failed file to retry list
-                                    failed_uploads.append((file_path, progress_msg, i, len(media_files)))
+                                    failed_uploads.append((file_path, enhanced_caption, i, len(media_files)))
                                     logger.warning("Failed to upload Instagram media, will retry", filename=file_path.name)
                                 
                                 # Small delay between uploads for better UX
@@ -821,7 +878,16 @@ class EnhancedTelegramBot:
                                     
                             except Exception as e:
                                 logger.error("Error processing Instagram media", error=str(e), filename=file_path.name)
-                                failed_uploads.append((file_path, progress_msg, i, len(media_files)))
+                                failed_uploads.append((file_path, enhanced_caption, i, len(media_files)))
+                        
+                        # Update final batch status
+                        if batch_msg:
+                            await self._safe_edit_message(
+                                batch_msg,
+                                f"✅ Upload batch completed!\n"
+                                f"Successful: {successful_uploads}/{len(media_files)}\n"
+                                f"Failed: {len(failed_uploads)}"
+                            )
                         
                         # Handle failed uploads with retry mechanism
                         if failed_uploads:
@@ -1914,7 +1980,8 @@ class EnhancedTelegramBot:
             try:
                 await self._increment_active_uploads()
 
-                caption = f"Media File ({file_number}/{total_files})"
+                file_size = file_path.stat().st_size
+                caption = self._generate_enhanced_caption(file_path, file_number, total_files, file_size)
                 logger.info("Bot API worker processing file", 
                            filename=file_path.name, 
                            progress=f"{file_number}/{total_files}")
@@ -1950,7 +2017,8 @@ class EnhancedTelegramBot:
             try:
                 await self._increment_active_uploads()
 
-                caption = f"Media File ({file_number}/{total_files})"
+                file_size = file_path.stat().st_size
+                caption = self._generate_enhanced_caption(file_path, file_number, total_files, file_size)
                 logger.info("Telethon worker processing file", 
                            filename=file_path.name, 
                            progress=f"{file_number}/{total_files}",
@@ -1993,7 +2061,7 @@ class EnhancedTelegramBot:
                             size=self._format_bytes(file_size))
 
                 # Determine upload method
-                caption = f"Media File ({file_number}/{total_files})"
+                caption = self._generate_enhanced_caption(file_path, file_number, total_files, file_size)
                 if file_size <= self.settings.large_file_threshold:
                     logger.info("Using Bot API (<= threshold)", threshold=self._format_bytes(self.settings.large_file_threshold))
                     await self.bot_api_queue.put((file_path, file_number, total_files))
@@ -2025,6 +2093,71 @@ class EnhancedTelegramBot:
                 await self.db.log_file_operation(file_path.name, file_size, "process_error", False, str(e))
                 # Don't increment counters here as this is a queue failure, not upload failure
                 return False
+
+    async def _create_progress_callback(self, file_path: Path, total_size: int, caption: str):
+        """Create a progress callback for large file uploads using tqdm."""
+        progress_msg = await self._safe_send_message_with_response(
+            self.settings.target_chat_id,
+            f"⏳ Preparing upload: {file_path.name}\n{caption}"
+        )
+        
+        async with self._progress_lock:
+            self._upload_progress_messages[str(file_path)] = progress_msg
+            self._current_file_progress[str(file_path)] = {
+                'uploaded': 0,
+                'total': total_size,
+                'last_update': 0
+            }
+        
+        async def progress_callback(uploaded: int, total: int):
+            """Async progress callback for file upload."""
+            current_time = time.time()
+            progress_info = self._current_file_progress.get(str(file_path))
+            
+            if not progress_info or not progress_msg:
+                return
+                
+            # Update only every 2 seconds to avoid rate limiting
+            if current_time - progress_info['last_update'] < 2.0 and uploaded < total:
+                progress_info['uploaded'] = uploaded
+                return
+                
+            progress_info['uploaded'] = uploaded
+            progress_info['last_update'] = current_time
+            
+            percentage = (uploaded / total) * 100
+            uploaded_mb = uploaded / 1024 / 1024
+            total_mb = total / 1024 / 1024
+            
+            # Create progress bar
+            bar_length = 20
+            filled_length = int(bar_length * uploaded // total)
+            bar = '█' * filled_length + '░' * (bar_length - filled_length)
+            
+            progress_text = (
+                f"⬆️ Uploading: {file_path.name}\n"
+                f"{caption}\n\n"
+                f"Progress: [{bar}] {percentage:.1f}%\n"
+                f"Size: {uploaded_mb:.1f}MB / {total_mb:.1f}MB"
+            )
+            
+            success = await self._safe_edit_message(progress_msg, progress_text)
+            if not success:
+                logger.warning("Failed to update progress message", filename=file_path.name)
+        
+        return progress_callback
+    
+    async def _cleanup_progress_tracking(self, file_path: Path, success: bool = True):
+        """Clean up progress tracking for a file."""
+        file_key = str(file_path)
+        async with self._progress_lock:
+            progress_msg = self._upload_progress_messages.pop(file_key, None)
+            self._current_file_progress.pop(file_key, None)
+            
+        if progress_msg:
+            status_icon = "✅" if success else "❌"
+            final_text = f"{status_icon} Upload {'completed' if success else 'failed'}: {file_path.name}"
+            await self._safe_edit_message(progress_msg, final_text)
 
     async def _send_via_bot_api(self, file_path: Path, caption: str) -> bool:
         """Modified Bot API send method with custom caption."""
@@ -2106,6 +2239,11 @@ class EnhancedTelegramBot:
 
                     # Log successful upload
                     await self.db.log_file_operation(file_path.name, file_size, "bot_api", True)
+
+                    # Send completion notification
+                    await self._safe_send_message(
+                        self.settings.target_chat_id, f"✅ {caption}"
+                    )
                     
                     await asyncio.sleep(self._bot_api_pause)
 
@@ -2173,15 +2311,30 @@ class EnhancedTelegramBot:
                         await self.db.log_file_operation(file_path.name, file_size, "telethon", False, error_msg)
                         return False
                     
-                    # Telethon handles large files more efficiently (streams), so no memory check needed                    
+                    # Telethon handles large files more efficiently (streams), so no memory check needed   
+                    
+                    # Create progress callback for large files
+                    progress_callback = None
+                    if file_size > 10 * 1024 * 1024:  # 10MB threshold for progress tracking
+                        progress_callback = await self._create_progress_callback(file_path, file_size, caption)
+                 
                     await self.telethon_client.send_file(
                         entity=self.settings.target_chat_id,
                         file=str(file_path),
-                        caption=caption
+                        caption=caption,
+                        progress_callback=progress_callback if progress_callback else None
                     )
 
                     # Log successful upload
                     await self.db.log_file_operation(file_path.name, file_size, "telethon", True)
+
+                    # Clean up progress tracking and send completion notification
+                    if progress_callback:
+                        await self._cleanup_progress_tracking(file_path, success=True)
+                    else:
+                        await self._safe_send_message(
+                            self.settings.target_chat_id, f"✅ {caption}"
+                        )
                     
                     await asyncio.sleep(self._telethon_pause)
 
@@ -2196,12 +2349,18 @@ class EnhancedTelegramBot:
                     return True
 
                 except FloodWaitError as e:
+                    # Clean up progress tracking on error
+                    if file_size > 10 * 1024 * 1024:
+                        await self._cleanup_progress_tracking(file_path, success=False)
                     wait_seconds = getattr(e, "seconds", retry_delay)
                     logger.warning("Flood wait error", wait_seconds=wait_seconds, filename=file_path.name)
                     await self.db.log_file_operation(file_path.name, 0, "telethon", False, f"Flood wait {wait_seconds}s, attempt {attempt + 1}")
                     await asyncio.sleep(wait_seconds)
                     attempt += 1
                 except Exception as e:
+                    # Clean up progress tracking on error
+                    if file_size > 10 * 1024 * 1024:
+                        await self._cleanup_progress_tracking(file_path, success=False)
                     logger.error("Telethon upload failed", error=str(e), filename=file_path.name, attempt=attempt + 1)
                     await self.db.log_file_operation(file_path.name, 0, "telethon", False, f"Upload error: {str(e)}")
 
