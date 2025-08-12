@@ -109,6 +109,11 @@ class BotSettings(BaseSettings):
     message_edit_retry_delay: float = Field(2.0, env='MESSAGE_EDIT_RETRY_DELAY', description="Delay between message edit retries")
     network_retry_attempts: int = Field(5, env='NETWORK_RETRY_ATTEMPTS', description="Network error retry attempts")
     flood_control_base_delay: float = Field(1.0, env='FLOOD_CONTROL_BASE_DELAY', description="Base delay for flood control handling")
+     
+    # Progress update settings
+    progress_update_threshold: float = Field(5.0, env='PROGRESS_UPDATE_THRESHOLD', description="Minimum percentage change before progress update")
+    download_progress_enabled: bool = Field(True, env='DOWNLOAD_PROGRESS_ENABLED', description="Enable download progress tracking")
+    caption_max_length: int = Field(200, env='CAPTION_MAX_LENGTH', description="Maximum length for Instagram captions")
 
     @field_validator('target_chat_id', 'api_id', 'max_concurrent_uploads', 'upload_rate_limit', 'large_file_threshold', 'max_retry_attempts')
     @classmethod
@@ -347,6 +352,15 @@ class EnhancedTelegramBot:
         self._upload_progress_messages: dict[str, any] = {}  # file_path -> message
         self._progress_lock = asyncio.Lock()
         self._current_file_progress: dict[str, dict] = {}  # file_path -> progress info
+         
+        # Smart progress tracking
+        self._last_progress_percentage: dict[str, float] = {}  # file_path -> last reported percentage
+        self._progress_message_timestamps: dict[str, float] = {}  # file_path -> last update time
+        
+        # Download progress tracking
+        self._download_progress_messages: dict[str, any] = {}  # download_id -> message
+        self._current_download_progress: dict[str, dict] = {}  # download_id -> progress info
+        self._download_counter: int = 0
         
         self._max_instagram_retries = 3
         self._instagram_retry_delay = 30  # Base delay in seconds
@@ -362,8 +376,9 @@ class EnhancedTelegramBot:
         self._max_messages_per_minute = 20  # Conservative limit
         self._batch_size = int(self.settings.batch_size)
 
-    def _generate_enhanced_caption(self, file_path: Path, file_number: int, total_files: int, 
-                                 file_size: int, content_type: str = "media") -> str:
+    def _generate_enhanced_caption(self, file_path: Path, file_number: int, total_files: int,
+                                 file_size: int, content_type: str = "media", 
+                                 instagram_caption: str = None) -> str:
         """Generate enhanced caption with file metadata."""
         size_str = self._format_bytes(file_size)
         
@@ -379,8 +394,124 @@ class EnhancedTelegramBot:
             type_icon = "📄"
             type_name = "Document"
         
-        return f"{type_icon} {type_name} ({file_number}/{total_files}) | {size_str}"
+        base_caption = f"{type_icon} {type_name} ({file_number}/{total_files}) | {size_str}"
+        
+        # Add Instagram caption if provided
+        if instagram_caption:
+            # Truncate caption if too long
+            if len(instagram_caption) > self.settings.caption_max_length:
+                instagram_caption = instagram_caption[:self.settings.caption_max_length - 3] + "..."
+            return f"{instagram_caption}\n\n{base_caption}"
+        
+        return base_caption
+    
+    def _extract_instagram_caption(self, post) -> str:
+        """Extract caption from Instagram post object."""
+        try:
+            if hasattr(post, 'caption') and post.caption:
+                # Clean up the caption - remove excessive whitespace and newlines
+                caption = post.caption.strip()
+                # Replace multiple newlines with single newlines
+                import re
+                caption = re.sub(r'\n\s*\n', '\n', caption)
+                # Replace multiple spaces with single spaces
+                caption = re.sub(r' +', ' ', caption)
+                return caption
+        except Exception as e:
+            logger.warning("Failed to extract Instagram caption", error=str(e))
+        return ""
 
+    async def _create_download_progress_callback(self, download_id: str, content_type: str, total_size: int = None):
+        """Create a progress callback for Instagram downloads."""
+        if not self.settings.download_progress_enabled:
+            return None
+            
+        progress_msg = await self._safe_send_message_with_response(
+            self.settings.target_chat_id,
+            f"⏬ Downloading Instagram {content_type}...\nInitializing download..."
+        )
+        
+        if not progress_msg:
+            return None
+            
+        async with self._progress_lock:
+            self._download_progress_messages[download_id] = progress_msg
+            self._current_download_progress[download_id] = {
+                'downloaded': 0,
+                'total': total_size or 0,
+                'last_update': 0,
+                'last_percentage': 0
+            }
+        
+        async def download_progress_callback(downloaded: int, total: int):
+            """Progress callback for download operations."""
+            current_time = time.time()
+            progress_info = self._current_download_progress.get(download_id)
+            
+            if not progress_info or not progress_msg:
+                return
+                
+            # Smart progress updates - only update if significant change
+            if total > 0:
+                percentage = (downloaded / total) * 100
+                percentage_change = abs(percentage - progress_info.get('last_percentage', 0))
+                
+                # Update conditions:
+                # 1. Significant percentage change
+                # 2. At least 3 seconds since last update (respect rate limiting)
+                # 3. Download complete
+                should_update = (
+                    percentage_change >= self.settings.progress_update_threshold or
+                    current_time - progress_info['last_update'] >= 3.0 or
+                    downloaded >= total
+                )
+                
+                if not should_update and downloaded < total:
+                    progress_info['downloaded'] = downloaded
+                    progress_info['total'] = total
+                    return
+                
+                progress_info['downloaded'] = downloaded
+                progress_info['total'] = total
+                progress_info['last_update'] = current_time
+                progress_info['last_percentage'] = percentage
+                
+                downloaded_mb = downloaded / 1024 / 1024
+                total_mb = total / 1024 / 1024
+                
+                # Create progress bar
+                bar_length = 15
+                filled_length = int(bar_length * downloaded // total) if total > 0 else 0
+                bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                
+                progress_text = (
+                    f"⏬ Downloading Instagram {content_type}...\n"
+                    f"Progress: [{bar}] {percentage:.1f}%\n"
+                    f"Size: {downloaded_mb:.1f}MB"
+                )
+                
+                if total_mb > 0:
+                    progress_text += f" / {total_mb:.1f}MB"
+                
+                success = await self._safe_edit_message(progress_msg, progress_text)
+                if not success:
+                    logger.warning("Failed to update download progress", download_id=download_id)
+        
+        return download_progress_callback
+
+    async def _cleanup_download_progress(self, download_id: str, success: bool = True, final_message: str = None):
+        """Clean up download progress tracking."""
+        async with self._progress_lock:
+            progress_msg = self._download_progress_messages.pop(download_id, None)
+            self._current_download_progress.pop(download_id, None)
+            
+        if progress_msg:
+            if final_message:
+                await self._safe_edit_message(progress_msg, final_message)
+            else:
+                status_icon = "✅" if success else "❌"
+                final_text = f"{status_icon} Download {'completed' if success else 'failed'}"
+                await self._safe_edit_message(progress_msg, final_text)
 
     async def _increment_completed(self):
         """Thread-safe increment of completed counter."""
@@ -791,6 +922,10 @@ class EnhancedTelegramBot:
         status_msg = await update.message.reply_text(f"⏳ Starting download for: `{url}`")
         logger.info("Received Instagram download request", url=url, shortcode=shortcode, type=detected_type)
 
+        # Create download ID for progress tracking
+        self._download_counter += 1
+        download_id = f"ig_download_{self._download_counter}"
+
         try:
             # Get files before download to compare later
             files_before = set(self._get_all_files_in_directory(self.downloads_path))
@@ -798,7 +933,12 @@ class EnhancedTelegramBot:
             content_type = detected_type if detected_type != 'unknown' else self._determine_instagram_content_type(url)         
             
             # Run the blocking Instaloader download function in a separate thread
-            download_result = await asyncio.to_thread(self._download_instagram_post, url, content_type)
+            # Create download progress callback
+            download_progress_callback = await self._create_download_progress_callback(
+                download_id, content_type
+            )
+            
+            download_result = await asyncio.to_thread(self._download_instagram_post, url, content_type, download_id, download_progress_callback)
 
             if download_result["success"]:
                 media_count = download_result.get("media_count", 1)
@@ -831,6 +971,11 @@ class EnhancedTelegramBot:
                         retry_files = []
                         successful_uploads = 0
 
+                        # Clean up download progress and show completion
+                        await self._cleanup_download_progress(
+                            download_id, True, f"✅ Download completed! Found {len(media_files)} {content_type_plural}"
+                        )
+
                         # Send initial batch notification
                         batch_msg = await self._safe_send_message_with_response(
                             self.settings.target_chat_id, 
@@ -840,8 +985,11 @@ class EnhancedTelegramBot:
                         for i, file_path in enumerate(media_files, 1):
                             try:
                                 file_size = file_path.stat().st_size
+
+                                # Extract and use Instagram caption
+                                instagram_caption = download_result.get("caption", "")
                                 enhanced_caption = self._generate_enhanced_caption(
-                                    file_path, i, len(media_files), file_size, content_type
+                                    file_path, i, len(media_files), file_size, content_type, instagram_caption
                                 )
                                 
                                 # Update batch progress
@@ -944,9 +1092,12 @@ class EnhancedTelegramBot:
                 else:
                     logger.warning("No new files found after download", 
                                 files_before=len(files_before), files_after=len(files_after))
+                    # Clean up download progress
+                    await self._cleanup_download_progress(download_id, False, "❌ No new files found after download")
                     await self._safe_edit_message(status_msg, "❌ No new files found after download. The content may already exist or download failed.")
             else:
                 error_msg = download_result.get("error", "Unknown error")
+                await self._cleanup_download_progress(download_id, False, f"❌ Download failed: {error_msg}")
                 await self._safe_edit_message(status_msg, f"❌ Download failed: {error_msg}")
 
         except Exception as e:
@@ -954,6 +1105,8 @@ class EnhancedTelegramBot:
             # Use safe message editing to handle potential rate limiting in error scenarios
             error_text = f"❌ An unexpected error occurred: `{str(e)[:100]}...`"
             success = await self._safe_edit_message(status_msg, error_text)
+            # Clean up download progress on error
+            await self._cleanup_download_progress(download_id, False, error_text)
             if not success:
                 logger.error("Failed to update status message with error information")
  
@@ -1842,7 +1995,7 @@ class EnhancedTelegramBot:
                 "username": username
             }
     
-    def _download_instagram_post(self, url: str, content_type: str = "post") -> dict:
+    def _download_instagram_post(self, url: str, content_type: str = "post", download_id: str = None, progress_callback = None) -> dict:
         """Blocking Instaloader download logic to be run in a separate thread."""
         try:
             # Initialize Instaloader with custom settings
@@ -1897,8 +2050,18 @@ class EnhancedTelegramBot:
             logger.info("Extracted shortcode", shortcode=shortcode)
             post = instaloader.Post.from_shortcode(L.context, shortcode)
 
+            # Extract caption from the post
+            instagram_caption = self._extract_instagram_caption(post)
+            if instagram_caption:
+                logger.info("Extracted Instagram caption", caption=instagram_caption[:50] + "..." if len(instagram_caption) > 50 else instagram_caption)
+
             # Get files before download for comparison
             files_before = self._get_all_files_in_directory(self.downloads_path)
+
+            # Simulate progress for downloads (Instaloader doesn't provide progress callbacks)
+            if progress_callback and download_id:
+                # Initial progress
+                asyncio.run_coroutine_threadsafe(progress_callback(0, 100), self.loop)
 
             # Detect if this is a carousel post
             expected_media_count = 1
@@ -1925,7 +2088,15 @@ class EnhancedTelegramBot:
                 logger.warning("Could not detect carousel items", error=str(e))
 
             # Download the post
+            # Update progress during download (simulated)
+            if progress_callback:
+                asyncio.run_coroutine_threadsafe(progress_callback(50, 100), self.loop)
+            
             L.download_post(post, target="")  # Empty string uses dirname_pattern
+
+            # Complete progress
+            if progress_callback:
+                asyncio.run_coroutine_threadsafe(progress_callback(100, 100), self.loop)
             
             # Get files after download
             files_after = self._get_all_files_in_directory(self.downloads_path)
@@ -1947,6 +2118,7 @@ class EnhancedTelegramBot:
                 "error": None, 
                 "media_count": len(new_files),
                 "content_type": actual_content_type,
+                "caption": instagram_caption,
                 "files": new_files
             }
         except Exception as e:
@@ -2117,10 +2289,30 @@ class EnhancedTelegramBot:
             if not progress_info or not progress_msg:
                 return
                 
-            # Update only every 2 seconds to avoid rate limiting
-            if current_time - progress_info['last_update'] < 2.0 and uploaded < total:
-                progress_info['uploaded'] = uploaded
+            
+            # Smart progress updates
+            if total > 0:
+                percentage = (uploaded / total) * 100
+                last_percentage = self._last_progress_percentage.get(str(file_path), 0)
+                percentage_change = abs(percentage - last_percentage)
+                
+                # Update conditions (smart progress):
+                # 1. Significant percentage change (configurable threshold)
+                # 2. At least 2 seconds since last update (respect rate limiting)
+                # 3. Upload complete
+                should_update = (
+                    percentage_change >= self.settings.progress_update_threshold or
+                    current_time - progress_info['last_update'] >= 2.0 or
+                    uploaded >= total
+                )
+                
+                if not should_update and uploaded < total:
+
+                    progress_info['uploaded'] = uploaded
                 return
+            
+            # Update tracking
+                self._last_progress_percentage[str(file_path)] = percentage
                 
             progress_info['uploaded'] = uploaded
             progress_info['last_update'] = current_time
