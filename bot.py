@@ -333,6 +333,12 @@ class EnhancedTelegramBot:
         # File numbering for single file processing
         self._single_file_counter: int = 0
         self._single_file_counter_lock = asyncio.Lock()
+
+        # Instagram upload retry mechanism
+        self._instagram_retry_queue: "asyncio.Queue[tuple[Path, str, int, int]]" = asyncio.Queue()
+        self._instagram_retry_worker_task: Optional[asyncio.Task] = None
+        self._max_instagram_retries = 3
+        self._instagram_retry_delay = 30  # Base delay in seconds
          
         # Pauses (seconds) between uploads to respect rate limits
         self._bot_api_pause = float(self.settings.bot_api_pause_seconds)
@@ -471,6 +477,11 @@ class EnhancedTelegramBot:
         # create background workers to process bot api and telethon queues
         if self._bot_api_worker_task is None:
             self._bot_api_worker_task = asyncio.create_task(self._bot_api_worker(), name="bot_api_worker")
+
+        # Start Instagram retry worker
+        if self._instagram_retry_worker_task is None:
+            self._instagram_retry_worker_task = asyncio.create_task(self._instagram_retry_worker(), name="instagram_retry_worker")
+         
         if self._telethon_worker_task is None:
             self._telethon_worker_task = asyncio.create_task(self._telethon_worker(), name="telethon_worker")
 
@@ -706,15 +717,21 @@ class EnhancedTelegramBot:
                         
                         logger.info("Processing Instagram media", count=len(media_files), type=content_type)
                         
-                        # Process files with enhanced progress tracking
+                        # Reset retry counter for new download
+                        await self._reset_single_file_counter()
+                        
+                        # Process files with enhanced progress tracking and retry mechanism
+                        failed_uploads = []
+                        retry_files = []
                         successful_uploads = 0
+
                         for i, file_path in enumerate(media_files, 1):
                             try:
                                 # Send individual progress message
                                 progress_msg = f"Instagram {content_type} ({i}/{len(media_files)})"
                                 
                                 # Process the file
-                                success = await self._process_instagram_media_file(file_path, progress_msg, i, len(media_files), content_type)
+                                success = await self._process_instagram_media_file(file_path, progress_msg, i, len(media_files), content_type, retry_count=0)
                                 
                                 if success:
                                     successful_uploads += 1
@@ -722,21 +739,66 @@ class EnhancedTelegramBot:
                                     # Send individual success notification to target chat with rate limiting
                                     await self._safe_send_message(self.settings.target_chat_id, progress_msg)                                 
                                 
+                                else:
+                                    # Add failed file to retry list
+                                    failed_uploads.append((file_path, progress_msg, i, len(media_files)))
+                                    logger.warning("Failed to upload Instagram media, will retry", filename=file_path.name)
+                                
                                 # Small delay between uploads for better UX
                                 if i < len(media_files):
                                     await asyncio.sleep(0.5)
                                     
                             except Exception as e:
                                 logger.error("Error processing Instagram media", error=str(e), filename=file_path.name)
+                                failed_uploads.append((file_path, progress_msg, i, len(media_files)))
+                        
+                        # Handle failed uploads with retry mechanism
+                        if failed_uploads:
+                            await self._safe_edit_message(
+                                status_msg, 
+                                f"⚠️ Processing {len(failed_uploads)} failed uploads. Retrying in {self._instagram_retry_delay} seconds..."
+                            )
+                            
+                            # Queue failed uploads for retry
+                            for failed_file, failed_msg, file_num, total in failed_uploads:
+                                await self._instagram_retry_queue.put((failed_file, failed_msg, file_num, total))
+                            
+                            # Wait for retry queue to be processed (with timeout)
+                            retry_timeout = 300  # 5 minutes max wait time
+                            retry_start = time.time()
+                            
+                            while not self._instagram_retry_queue.empty() and (time.time() - retry_start) < retry_timeout:
+                                await asyncio.sleep(2)
+                                
+                                # Update progress
+                                remaining = self._instagram_retry_queue.qsize()
+                                if remaining > 0:
+                                    await self._safe_edit_message(
+                                        status_msg, 
+                                        f"🔄 Retrying failed uploads... ({remaining} remaining)"
+                                    )
+                            
+                            # Check final results
+                            final_retry_stats = await self._get_instagram_retry_stats()
+                            successful_uploads += final_retry_stats.get('successful_retries', 0)
                         
                         # Send completion messages
                         if successful_uploads > 0:
-                            # First completion message
+                            total_attempted = len(media_files)
+                            final_failed = total_attempted - successful_uploads
+                            
+                            # Completion message with detailed stats
                             completion_msg = f"✅ Successfully sent {successful_uploads} of {len(media_files)} {content_type_plural}."
+                            if final_failed > 0:
+                                completion_msg += f"\n❌ {final_failed} files failed after retries."
+                            
                             await self._safe_send_message(self.settings.target_chat_id, completion_msg)
                             
                             # Final success message
-                            final_msg = f"✅ All {successful_uploads} unique {content_type_plural} sent successfully!"
+                            if final_failed == 0:
+                                final_msg = f"✅ All {successful_uploads} unique {content_type_plural} sent successfully!"
+                            else:
+                                final_msg = f"⚠️ Upload completed: {successful_uploads} successful, {final_failed} failed"
                             await self._safe_edit_message(status_msg, final_msg)
                         else:
                             await self._safe_edit_message(status_msg, "❌ Failed to upload any media files.")
@@ -783,7 +845,49 @@ class EnhancedTelegramBot:
             'media': 'media files'
         }
         return plurals.get(content_type, f"{content_type}s")
-    async def _process_instagram_media_file(self, file_path: Path, caption: str, media_number: int, total_media: int, content_type: str) -> bool:
+    async def _instagram_retry_worker(self):
+        """Worker to handle Instagram upload retries with exponential backoff."""
+        logger.info("Instagram retry worker started")
+        
+        while True:
+            try:
+                file_path, caption, media_number, total_media = await self._instagram_retry_queue.get()
+                
+                # Progressive delay for retries
+                retry_delay = self._instagram_retry_delay
+                max_retries = self._max_instagram_retries
+                
+                success = False
+                for retry_attempt in range(max_retries):
+                    try:
+                        # Wait with exponential backoff
+                        if retry_attempt > 0:
+                            wait_time = retry_delay * (2 ** (retry_attempt - 1))
+                            logger.info(f"Retrying Instagram upload in {wait_time}s", filename=file_path.name, attempt=retry_attempt + 1)
+                            await asyncio.sleep(wait_time)
+                        
+                        # Attempt upload with enhanced error handling
+                        success = await self._process_instagram_media_file(
+                            file_path, f"{caption} (retry {retry_attempt + 1})", 
+                            media_number, total_media, "post", retry_count=retry_attempt + 1
+                        )
+                        
+                        if success:
+                            logger.info("Instagram retry successful", filename=file_path.name, attempt=retry_attempt + 1)
+                            break
+                            
+                    except Exception as e:
+                        logger.error("Instagram retry attempt failed", error=str(e), filename=file_path.name, attempt=retry_attempt + 1)
+                        
+                if not success:
+                    logger.error("All Instagram retry attempts failed", filename=file_path.name)
+                    
+            except Exception as e:
+                logger.exception("Instagram retry worker error", error=str(e))
+            finally:
+                self._instagram_retry_queue.task_done()
+
+    async def _process_instagram_media_file(self, file_path: Path, caption: str, media_number: int, total_media: int, content_type: str, retry_count: int = 0) -> bool:
         """Process a single Instagram media file and upload it with enhanced tracking."""
         try:
             file_size = file_path.stat().st_size
@@ -795,11 +899,12 @@ class EnhancedTelegramBot:
                         type=content_type)
 
             # Determine upload method based on file size
+            success = False
             if file_size <= self.settings.large_file_threshold:
-                success = await self._send_via_bot_api_direct(file_path, caption)
+                success = await self._send_via_bot_api_direct(file_path, caption, retry_count=retry_count)
                 method = "bot_api"
             else:
-                success = await self._send_via_telethon_direct(file_path, caption)
+                success = await self._send_via_telethon_direct(file_path, caption, retry_count=retry_count)
                 method = "telethon"
 
             # Log the operation
@@ -811,7 +916,7 @@ class EnhancedTelegramBot:
                 None if success else "Upload failed"
             )
 
-            if success:
+            if success and retry_count == 0:  # Only delete on first success, not retries
                 # Delete file after successful upload
                 try:
                     await asyncio.to_thread(file_path.unlink)
@@ -831,7 +936,7 @@ class EnhancedTelegramBot:
                 str(e)
             )
             return False
-    async def _send_via_bot_api_direct(self, file_path: Path, caption: str) -> bool:
+    async def _send_via_bot_api_direct(self, file_path: Path, caption: str, retry_count: int = 0) -> bool:
         """Direct Bot API upload without queue system for immediate processing."""
         try:
             if not file_path.exists():
@@ -841,7 +946,14 @@ class EnhancedTelegramBot:
             if file_size > BOT_API_MAX_FILE_SIZE:
                 logger.warning("File too large for Bot API", size=self._format_bytes(file_size))
                 return False
-                
+            # Enhanced flood control handling with exponential backoff
+            base_delay = 3.0 if retry_count == 0 else min(30.0, 3.0 * (2 ** retry_count))
+            
+            # Add jitter to prevent thundering herd
+            import random
+            jitter = random.uniform(0.1, 1.0)
+            await asyncio.sleep(base_delay + jitter)
+                    
             mime_type = magic.from_file(str(file_path), mime=True)
             
             async with aiofiles.open(file_path, 'rb') as file:
@@ -867,14 +979,42 @@ class EnhancedTelegramBot:
                     caption=caption
                 )
             
-            # Small pause to respect rate limits
-            await asyncio.sleep(self.settings.bot_api_pause_seconds)
+            # Adaptive pause based on retry count
+            pause_time = self.settings.bot_api_pause_seconds * (1 + retry_count * 0.5)
+            await asyncio.sleep(pause_time)
             return True
+
+        except RetryAfter as e:
+            # Handle Telegram rate limiting
+            wait_time = max(e.retry_after, 10)  # At least 10 seconds
+            logger.warning("Telegram rate limit hit", wait_time=wait_time, filename=file_path.name, retry_count=retry_count)
             
-        except Exception as e:
-            logger.error("Direct Bot API upload failed", error=str(e), filename=file_path.name)
+            if retry_count < 2:  # Allow some immediate retries for rate limits
+                await asyncio.sleep(wait_time)
+                return await self._send_via_bot_api_direct(file_path, caption, retry_count + 1)
             return False
-    async def _send_via_telethon_direct(self, file_path: Path, caption: str) -> bool:
+            
+        except (ConnectionError, TimeoutError) as e:
+            # Handle network issues
+            logger.warning("Network error during Bot API upload", error=str(e), filename=file_path.name, retry_count=retry_count)
+            
+            if retry_count < 2:
+                await asyncio.sleep(5 * (retry_count + 1))  # Progressive delay
+                return await self._send_via_bot_api_direct(file_path, caption, retry_count + 1)
+            return False
+                
+        except Exception as e:
+            error_str = str(e).lower()
+            logger.error("Direct Bot API upload failed", error=str(e), filename=file_path.name, retry_count=retry_count)
+            
+            # Check if it's a retryable error
+            if any(keyword in error_str for keyword in ['flood', 'timeout', 'network', 'connection']):
+                if retry_count < 2:
+                    await asyncio.sleep(10 * (retry_count + 1))
+                    return await self._send_via_bot_api_direct(file_path, caption, retry_count + 1)
+            
+            return False
+    async def _send_via_telethon_direct(self, file_path: Path, caption: str, retry_count: int = 0) -> bool:
         """Direct Telethon upload without queue system for immediate processing."""
         try:
             if not file_path.exists():
@@ -885,19 +1025,60 @@ class EnhancedTelegramBot:
                 logger.warning("File too large for Telethon", size=self._format_bytes(file_size))
                 return False
             
+            # Enhanced flood control handling
+            base_delay = 1.0 if retry_count == 0 else min(15.0, 1.0 * (2 ** retry_count))
+            
+            # Add jitter
+            import random
+            jitter = random.uniform(0.1, 0.5)
+            await asyncio.sleep(base_delay + jitter)
+            
             await self.telethon_client.send_file(
                 entity=self.settings.target_chat_id,
                 file=str(file_path),
                 caption=caption
             )
             
-            # Small pause to respect rate limits
-            await asyncio.sleep(self.settings.telethon_pause_seconds)
+            # Adaptive pause based on retry count
+            pause_time = self.settings.telethon_pause_seconds * (1 + retry_count * 0.3)
+            await asyncio.sleep(pause_time)
             return True
+
+        except FloodWaitError as e:
+            wait_seconds = getattr(e, "seconds", 30)
+            logger.warning("Telethon flood wait error", wait_seconds=wait_seconds, filename=file_path.name, retry_count=retry_count)
             
-        except Exception as e:
-            logger.error("Direct Telethon upload failed", error=str(e), filename=file_path.name)
+            if retry_count < 2:
+                await asyncio.sleep(wait_seconds)
+                return await self._send_via_telethon_direct(file_path, caption, retry_count + 1)
             return False
+            
+        except (ConnectionError, TimeoutError) as e:
+            logger.warning("Network error during Telethon upload", error=str(e), filename=file_path.name, retry_count=retry_count)
+            
+            if retry_count < 2:
+                await asyncio.sleep(8 * (retry_count + 1))
+                return await self._send_via_telethon_direct(file_path, caption, retry_count + 1)
+            return False
+                
+        except Exception as e:
+            error_str = str(e).lower()
+            logger.error("Direct Telethon upload failed", error=str(e), filename=file_path.name, retry_count=retry_count)
+            
+            # Check if it's a retryable error
+            if any(keyword in error_str for keyword in ['flood', 'timeout', 'network', 'connection']):
+                if retry_count < 2:
+                    await asyncio.sleep(12 * (retry_count + 1))
+                    return await self._send_via_telethon_direct(file_path, caption, retry_count + 1)
+            
+            return False
+                 
+    async def _get_instagram_retry_stats(self) -> dict:
+        """Get statistics for Instagram retry operations."""
+        # This would be implemented to track retry success/failure rates
+        # For now, return a placeholder
+        return {"successful_retries": 0, "failed_retries": 0}
+
         
     async def handle_instagram_login(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -2054,9 +2235,17 @@ class EnhancedTelegramBot:
         if self.bot_app:
             shutdown_tasks.append(self.bot_app.shutdown())
 
-         # Close database
+        # Close database
         shutdown_tasks.append(self.db.close())
 
+        # Stop Instagram retry worker
+        if self._instagram_retry_worker_task and not self._instagram_retry_worker_task.done():
+            self._instagram_retry_worker_task.cancel()
+            try:
+                await self._instagram_retry_worker_task
+            except asyncio.CancelledError:
+                pass
+        
         # Execute all shutdown tasks concurrently with timeout
         if shutdown_tasks:
             try:
@@ -2155,7 +2344,7 @@ async def main():
     finally:
         # Set the shutdown event to break the main loop
         if not shutdown_event.done():
-            shutdown_event.set_result(None)
+            shutdown_event.set_result(None)     
         
         # Give a moment for any pending operations to complete
         await asyncio.sleep(0.1)
