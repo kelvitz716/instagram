@@ -333,6 +333,7 @@ class EnhancedTelegramBot:
         # Status message tracking
         self._last_status_update = 0.0
         self._status_update_interval = float(self.settings.status_update_interval)
+        self._last_status_text = ""
 
         # File numbering for single file processing
         self._single_file_counter: int = 0
@@ -664,7 +665,21 @@ class EnhancedTelegramBot:
             
         try:
             remaining_queue = self.bot_api_queue.qsize() + self.telethon_queue.qsize()
+
+            # Add timestamp to make each message unique
+            timestamp = time.strftime("%H:%M:%S", time.localtime(current_time))
+            
             progress_text = (
+                f"📤 Processing Batch {current_batch}/{total_batches} ({timestamp})\n"
+                f"• Total files: {total_files}\n"
+                f"• Completed: {completed}/{total_files}\n"
+                f"• Failed: {failed}\n"
+                f"• Active uploads: {active}\n"
+                f"• Queue remaining: {remaining_queue}"
+            )
+            
+            # Only update if content actually changed (excluding timestamp)
+            progress_without_timestamp = (
                 f"📤 Processing Batch {current_batch}/{total_batches}\n"
                 f"• Total files: {total_files}\n"
                 f"• Completed: {completed}/{total_files}\n"
@@ -673,7 +688,11 @@ class EnhancedTelegramBot:
                 f"• Queue remaining: {remaining_queue}"
             )
             
-            success = await self._safe_edit_message(status_msg, progress_text)
+            if progress_without_timestamp != self._last_status_text:
+                success = await self._safe_edit_message(status_msg, progress_text)
+                if success:
+                    self._last_status_update = current_time
+                    self._last_status_text = progress_without_timestamp
             if success:
                 self._last_status_update = current_time
         except Exception as e:
@@ -2382,8 +2401,16 @@ class EnhancedTelegramBot:
                 if "message is not modified" in str(e).lower():
                     logger.debug("Message content unchanged, skipping edit")
                     return True
+                elif "exactly the same" in str(e).lower():
+                    logger.debug("Message content exactly the same, skipping edit")
+                    return True
                     
-                logger.warning("Telegram error editing message", error=str(e), attempt=attempt + 1)
+                # Don't log "message not modified" as warnings since they're expected
+                if "not modified" not in str(e).lower():
+                    logger.warning("Telegram error editing message", error=str(e), attempt=attempt + 1)
+                else:
+                    logger.debug("Message not modified, skipping", error=str(e))
+                    return True
                 if attempt < max_retries - 1:
                     wait_time = self.settings.message_edit_retry_delay * (2 ** attempt)
                     await asyncio.sleep(wait_time)
