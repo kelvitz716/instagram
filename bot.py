@@ -114,6 +114,12 @@ class BotSettings(BaseSettings):
     progress_update_threshold: float = Field(5.0, env='PROGRESS_UPDATE_THRESHOLD', description="Minimum percentage change before progress update")
     download_progress_enabled: bool = Field(True, env='DOWNLOAD_PROGRESS_ENABLED', description="Enable download progress tracking")
     caption_max_length: int = Field(200, env='CAPTION_MAX_LENGTH', description="Maximum length for Instagram captions")
+     
+    # Timeout settings
+    bot_api_timeout: float = Field(30.0, env='BOT_API_TIMEOUT', description="Bot API request timeout in seconds")
+    telethon_timeout: float = Field(60.0, env='TELETHON_TIMEOUT', description="Telethon upload timeout in seconds")
+    connection_timeout: float = Field(10.0, env='CONNECTION_TIMEOUT', description="Connection timeout in seconds")
+    read_timeout: float = Field(20.0, env='READ_TIMEOUT', description="Read timeout in seconds")
 
     @field_validator('target_chat_id', 'api_id', 'max_concurrent_uploads', 'upload_rate_limit', 'large_file_threshold', 'max_retry_attempts')
     @classmethod
@@ -624,7 +630,15 @@ class EnhancedTelegramBot:
         await self.db.initialize()
 
         # Initialize Telegram clients
-        self.bot_app = Application.builder().token(self.settings.bot_token).build()
+        self.bot_app = Application.builder().token(self.settings.bot_token).read_timeout(
+            self.settings.read_timeout
+        ).write_timeout(
+            self.settings.bot_api_timeout
+        ).connection_pool_size(
+            8
+        ).pool_timeout(
+            self.settings.connection_timeout
+        ).build()
         self._setup_handlers()
 
         self.telethon_client = TelegramClient(
@@ -825,6 +839,8 @@ class EnhancedTelegramBot:
     async def _update_batch_status(self, status_msg, current_batch: int, total_batches: int, 
                                    completed: int, failed: int, active: int, total_files: int):
         """Update batch processing status with rate limiting."""
+        success = True  # Initialize success variable
+        
         current_time = time.time()
         if current_time - self._last_status_update < self._status_update_interval:
             return
@@ -1002,11 +1018,11 @@ class EnhancedTelegramBot:
                                     )
                                 
                                 # Process the file
-                                success = await self._process_instagram_media_file(
+                                upload_success = await self._process_instagram_media_file(
                                     file_path, enhanced_caption, i, len(media_files), content_type, retry_count=0
                                 )
                                 
-                                if success:
+                                if upload_success:
                                     successful_uploads += 1
                                     
                                     # Send individual success notification to target chat with rate limiting
@@ -1226,6 +1242,21 @@ class EnhancedTelegramBot:
                 str(e)
             )
             return False
+        
+    def _should_fallback_to_telethon(self, error: Exception, file_size: int) -> bool:
+        """Determine if we should fallback to Telethon based on error type and file size."""
+        error_str = str(error).lower()
+        
+        # Fallback conditions:
+        # 1. Timeout errors (network/server issues)
+        # 2. File too large errors
+        # 3. Files over 20MB that failed with network errors
+        timeout_keywords = ['timeout', 'timed out', 'connection', 'network']
+        size_keywords = ['too large', 'file size', 'entity too large']
+        
+        return (any(keyword in error_str for keyword in timeout_keywords + size_keywords) or
+                (file_size > 20 * 1024 * 1024 and any(keyword in error_str for keyword in timeout_keywords)))
+     
     async def _send_via_bot_api_direct(self, file_path: Path, caption: str, retry_count: int = 0) -> bool:
         """Direct Bot API upload without queue system for immediate processing."""
         try:
@@ -1233,9 +1264,14 @@ class EnhancedTelegramBot:
                 return False
                 
             file_size = file_path.stat().st_size
-            if file_size > BOT_API_MAX_FILE_SIZE:
-                logger.warning("File too large for Bot API", size=self._format_bytes(file_size))
-                return False
+             
+            # For files over Bot API limit or previous timeout failures, try Telethon instead
+            if (file_size > BOT_API_MAX_FILE_SIZE or 
+                (retry_count > 0 and file_size > 10 * 1024 * 1024)):  # 10MB threshold for retry fallback
+                logger.info("Falling back to Telethon due to size or retry", 
+                           size=self._format_bytes(file_size), retry_count=retry_count)
+                return await self._send_via_telethon_direct(file_path, caption, retry_count)
+            
             # Enhanced flood control handling with exponential backoff
             base_delay = 3.0 if retry_count == 0 else min(30.0, 3.0 * (2 ** retry_count))
             
@@ -1251,29 +1287,46 @@ class EnhancedTelegramBot:
             
             # Send based on media type
             if mime_type.startswith('image/'):
-                await self.bot_app.bot.send_photo(
+                await asyncio.wait_for(
+                    self.bot_app.bot.send_photo(
                     chat_id=self.settings.target_chat_id,
                     photo=file_data,
                     caption=caption
-                )
+                ), timeout=self.settings.bot_api_timeout)
             elif mime_type.startswith('video/'):
-                await self.bot_app.bot.send_video(
+                await asyncio.wait_for(
+                    self.bot_app.bot.send_video(
                     chat_id=self.settings.target_chat_id,
                     video=file_data,
                     caption=caption
-                )
+                ), timeout=self.settings.bot_api_timeout)
             else:
-                await self.bot_app.bot.send_document(
+                await asyncio.wait_for(
++                    self.bot_app.bot.send_document(
                     chat_id=self.settings.target_chat_id,
                     document=file_data,
                     caption=caption
-                )
+                ), timeout=self.settings.bot_api_timeout)
             
             # Adaptive pause based on retry count
             pause_time = self.settings.bot_api_pause_seconds * (1 + retry_count * 0.5)
             await asyncio.sleep(pause_time)
             return True
 
+        except asyncio.TimeoutError as e:
+            logger.warning("Bot API upload timeout", filename=file_path.name, retry_count=retry_count, 
+                          timeout=self.settings.bot_api_timeout)
+            
+            # For timeout errors, consider fallback to Telethon for larger files
+            if self._should_fallback_to_telethon(e, file_size) and retry_count < 2:
+                logger.info("Attempting Telethon fallback due to timeout", filename=file_path.name)
+                return await self._send_via_telethon_direct(file_path, caption, retry_count + 1)
+            
+            if retry_count < 2:
+                await asyncio.sleep(10 * (retry_count + 1))
+                return await self._send_via_bot_api_direct(file_path, caption, retry_count + 1)
+            return False
+            
         except RetryAfter as e:
             # Handle Telegram rate limiting
             wait_time = max(e.retry_after, 10)  # At least 10 seconds
@@ -1288,6 +1341,11 @@ class EnhancedTelegramBot:
             # Handle network issues
             logger.warning("Network error during Bot API upload", error=str(e), filename=file_path.name, retry_count=retry_count)
             
+            # Consider fallback for network errors on larger files
+            if self._should_fallback_to_telethon(e, file_size) and retry_count < 2:
+                logger.info("Attempting Telethon fallback due to network error", filename=file_path.name)
+                return await self._send_via_telethon_direct(file_path, caption, retry_count + 1)
+            
             if retry_count < 2:
                 await asyncio.sleep(5 * (retry_count + 1))  # Progressive delay
                 return await self._send_via_bot_api_direct(file_path, caption, retry_count + 1)
@@ -1298,6 +1356,10 @@ class EnhancedTelegramBot:
             logger.error("Direct Bot API upload failed", error=str(e), filename=file_path.name, retry_count=retry_count)
             
             # Check if it's a retryable error
+            if self._should_fallback_to_telethon(e, file_size) and retry_count < 2:
+                logger.info("Attempting Telethon fallback due to error", filename=file_path.name, error=str(e)[:50])
+                return await self._send_via_telethon_direct(file_path, caption, retry_count + 1)
+            
             if any(keyword in error_str for keyword in ['flood', 'timeout', 'network', 'connection']):
                 if retry_count < 2:
                     await asyncio.sleep(10 * (retry_count + 1))
@@ -1323,17 +1385,27 @@ class EnhancedTelegramBot:
             jitter = random.uniform(0.1, 0.5)
             await asyncio.sleep(base_delay + jitter)
             
-            await self.telethon_client.send_file(
+            await asyncio.wait_for(
+                self.telethon_client.send_file(
                 entity=self.settings.target_chat_id,
                 file=str(file_path),
                 caption=caption
-            )
+            ), timeout=self.settings.telethon_timeout)
             
             # Adaptive pause based on retry count
             pause_time = self.settings.telethon_pause_seconds * (1 + retry_count * 0.3)
             await asyncio.sleep(pause_time)
             return True
 
+        except asyncio.TimeoutError as e:
+            logger.warning("Telethon upload timeout", filename=file_path.name, retry_count=retry_count,
+                          timeout=self.settings.telethon_timeout)
+            
+            if retry_count < 2:
+                await asyncio.sleep(15 * (retry_count + 1))
+                return await self._send_via_telethon_direct(file_path, caption, retry_count + 1)
+            return False
+            
         except FloodWaitError as e:
             wait_seconds = getattr(e, "seconds", 30)
             logger.warning("Telethon flood wait error", wait_seconds=wait_seconds, filename=file_path.name, retry_count=retry_count)
