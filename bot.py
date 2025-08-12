@@ -39,6 +39,7 @@ from telegram.error import TelegramError, NetworkError, TimedOut, RetryAfter
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 import instaloader
+import httpx
 
 
 # Configure structured logging
@@ -103,6 +104,11 @@ class BotSettings(BaseSettings):
 
     status_update_interval: float = Field(5.0, env='STATUS_UPDATE_INTERVAL', description="Minimum seconds between status updates")
     status_max_retries: int = Field(3, env='STATUS_MAX_RETRIES', description="Maximum retries for status message updates")
+
+    # Enhanced error handling settings
+    message_edit_retry_delay: float = Field(2.0, env='MESSAGE_EDIT_RETRY_DELAY', description="Delay between message edit retries")
+    network_retry_attempts: int = Field(5, env='NETWORK_RETRY_ATTEMPTS', description="Network error retry attempts")
+    flood_control_base_delay: float = Field(1.0, env='FLOOD_CONTROL_BASE_DELAY', description="Base delay for flood control handling")
 
     @field_validator('target_chat_id', 'api_id', 'max_concurrent_uploads', 'upload_rate_limit', 'large_file_threshold', 'max_retry_attempts')
     @classmethod
@@ -331,6 +337,12 @@ class EnhancedTelegramBot:
         # Pauses (seconds) between uploads to respect rate limits
         self._bot_api_pause = float(self.settings.bot_api_pause_seconds)
         self._telethon_pause = float(self.settings.telethon_pause_seconds)
+
+        # Rate limiting tracking
+        self._last_message_time = 0.0
+        self._message_count_in_window = 0
+        self._message_window_start = 0.0
+        self._max_messages_per_minute = 20  # Conservative limit
         self._batch_size = int(self.settings.batch_size)
 
     async def _increment_completed(self):
@@ -364,6 +376,63 @@ class EnhancedTelegramBot:
             self._completed_count = 0
             self._failed_count = 0
             self._active_uploads = 0
+    
+    async def _rate_limit_check(self):
+        """Check and enforce rate limiting for outgoing messages."""
+        current_time = time.time()
+        
+        # Reset window if more than 60 seconds have passed
+        if current_time - self._message_window_start > 60:
+            self._message_window_start = current_time
+            self._message_count_in_window = 0
+        
+        # If we're at the limit, wait until the window resets
+        if self._message_count_in_window >= self._max_messages_per_minute:
+            wait_time = 60 - (current_time - self._message_window_start)
+            if wait_time > 0:
+                logger.info("Rate limit reached, waiting", wait_time=wait_time)
+                await asyncio.sleep(wait_time)
+                self._message_window_start = time.time()
+                self._message_count_in_window = 0
+        
+        # Ensure minimum time between messages
+        time_since_last = current_time - self._last_message_time
+        min_interval = 3.0  # Minimum 3 seconds between messages
+        if time_since_last < min_interval:
+            wait_time = min_interval - time_since_last
+            await asyncio.sleep(wait_time)
+        
+        self._last_message_time = time.time()
+        self._message_count_in_window += 1
+
+    async def _safe_send_message(self, chat_id: int, text: str, parse_mode: str = None) -> bool:
+        """Safely send a message with rate limiting and retry logic."""
+        max_retries = self.settings.status_max_retries
+        
+        for attempt in range(max_retries):
+            try:
+                await self._rate_limit_check()
+                await self.bot_app.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+                return True
+            except RetryAfter as e:
+                wait_time = max(e.retry_after, self.settings.flood_control_base_delay * (2 ** attempt))
+                logger.warning("Rate limited while sending message", wait_time=wait_time, attempt=attempt + 1)
+                await asyncio.sleep(wait_time)
+            except (NetworkError, httpx.ConnectError) as e:
+                if attempt < max_retries - 1:
+                    wait_time = self.settings.message_edit_retry_delay * (2 ** attempt)
+                    logger.warning("Network error sending message, retrying", error=str(e), wait_time=wait_time)
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error("Failed to send message after all retries", error=str(e))
+                    return False
+            except Exception as e:
+                logger.error("Unexpected error sending message", error=str(e), attempt=attempt + 1)
+                if attempt == max_retries - 1:
+                    return False
+                await asyncio.sleep(self.settings.message_edit_retry_delay)
+        
+        return False
 
     async def initialize(self):
         """Initialize all bot components."""
@@ -417,6 +486,7 @@ class EnhancedTelegramBot:
         self.bot_app.add_handler(CommandHandler("watch", self.handle_watch_toggle))
         self.bot_app.add_handler(CommandHandler("downloadig", self.handle_download_instagram))
         self.bot_app.add_handler(CommandHandler("login", self.handle_instagram_login))
+        self.bot_app.add_handler(CommandHandler("debug_firefox", self.handle_debug_firefox))
  
     async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command."""
@@ -428,6 +498,7 @@ class EnhancedTelegramBot:
             "• `/watch` - Toggle automatic file watching\n"
             "• `/downloadig <url>` - Download a single Instagram post\n"
             "• `/login` - Login to Instagram using Firefox cookies\n"
+            "• `/debug_firefox` - Debug Firefox profile detection\n"
             "• `/start` - Show this help\n\n"
             "Features: Smart file handling, automatic watching, detailed logging",
             parse_mode='Markdown'
@@ -486,6 +557,9 @@ class EnhancedTelegramBot:
         status_msg = await update.message.reply_text(
             f"🔍 Found {total_files} files. Processing in batches of {self._batch_size}..."
         )
+                
+        # Add initial delay to avoid immediate rate limiting
+        await asyncio.sleep(1.0)
 
         # Reset counters safely
         await self._reset_counters()
@@ -497,7 +571,7 @@ class EnhancedTelegramBot:
             batch_size = len(batch)
 
             completed, failed, active = await self._get_counters()
-            await status_msg.edit_text(
+            await self._safe_edit_message(status_msg,
                 f"📤 Processing Batch {current_batch}/{total_batches}\n"
                 f"• Total files: {total_files}\n"
                 f"• Current batch: {batch_size} files\n"
@@ -532,7 +606,7 @@ class EnhancedTelegramBot:
         # Final summary
         completed, failed, active = await self._get_counters()
         success_rate = (completed / total_files) * 100 if total_files > 0 else 0
-        final_message = (
+        final_summary = (
             f"✅ Upload Complete!\n\n"
             f"📊 Summary:\n"
             f"• Total files processed: {total_files}\n"
@@ -540,7 +614,7 @@ class EnhancedTelegramBot:
             f"• Failed: {failed}\n"
             f"• Success rate: {success_rate:.1f}%"
         )
-        await status_msg.edit_text(final_message)
+        await self._safe_edit_message(status_msg, final_summary)
 
     async def _get_next_file_number(self) -> int:
         """Thread-safe method to get the next file number for single file processing."""
@@ -645,14 +719,8 @@ class EnhancedTelegramBot:
                                 if success:
                                     successful_uploads += 1
                                     
-                                    # Send individual success notification to target chat
-                                    try:
-                                        await self.bot_app.bot.send_message(
-                                            chat_id=self.settings.target_chat_id,
-                                            text=progress_msg
-                                        )
-                                    except Exception as e:
-                                        logger.warning("Failed to send progress message", error=str(e))
+                                    # Send individual success notification to target chat with rate limiting
+                                    await self._safe_send_message(self.settings.target_chat_id, progress_msg)                                 
                                 
                                 # Small delay between uploads for better UX
                                 if i < len(media_files):
@@ -665,29 +733,31 @@ class EnhancedTelegramBot:
                         if successful_uploads > 0:
                             # First completion message
                             completion_msg = f"✅ Successfully sent {successful_uploads} of {len(media_files)} {content_type_plural}."
-                            await self.bot_app.bot.send_message(
-                                chat_id=self.settings.target_chat_id,
-                                text=completion_msg
-                            )
+                            await self._safe_send_message(self.settings.target_chat_id, completion_msg)
                             
                             # Final success message
                             final_msg = f"✅ All {successful_uploads} unique {content_type_plural} sent successfully!"
-                            await status_msg.edit_text(final_msg)
+                            await self._safe_edit_message(status_msg, final_msg)
                         else:
-                            await status_msg.edit_text("❌ Failed to upload any media files.")
+                            await self._safe_edit_message(status_msg, "❌ Failed to upload any media files.")
                     else:
-                        await status_msg.edit_text("❌ No supported media files found in downloaded content.")
+                        await self._safe_edit_message(status_msg, "❌ No supported media files found in downloaded content.")
                 else:
                     logger.warning("No new files found after download", 
                                 files_before=len(files_before), files_after=len(files_after))
-                    await status_msg.edit_text("❌ No new files found after download. The content may already exist or download failed.")
+                    await self._safe_edit_message(status_msg, "❌ No new files found after download. The content may already exist or download failed.")
             else:
                 error_msg = download_result.get("error", "Unknown error")
-                await status_msg.edit_text(f"❌ Download failed: {error_msg}")
+                await self._safe_edit_message(status_msg, f"❌ Download failed: {error_msg}")
 
         except Exception as e:
             logger.exception("Unexpected error during Instagram download", error=str(e))
-            await status_msg.edit_text(f"❌ An unexpected error occurred: `{str(e)[:100]}...`")
+            # Use safe message editing to handle potential rate limiting in error scenarios
+            error_text = f"❌ An unexpected error occurred: `{str(e)[:100]}...`"
+            success = await self._safe_edit_message(status_msg, error_text)
+            if not success:
+                logger.error("Failed to update status message with error information")
+ 
     def _determine_instagram_content_type(self, url: str) -> str:
         """Determine the type of Instagram content from URL."""
         url_lower = url.lower()
@@ -901,6 +971,343 @@ class EnhancedTelegramBot:
                 "Please try again or check the logs for details.",
                 parse_mode='Markdown'
             )
+    
+    async def handle_debug_firefox(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Debug command to help troubleshoot Firefox profile and cookie detection.
+        Usage: /debug_firefox [profile_name]
+        """
+        firefox_profile = context.args[0] if context.args else None
+        
+        await update.message.reply_text("🔍 **Firefox Debug Information**\n\nSearching for Firefox profiles and cookies...", parse_mode='Markdown')
+        
+        try:
+            # Run debug in thread to avoid blocking
+            debug_info = await asyncio.to_thread(self._debug_firefox_setup, firefox_profile)
+            
+            debug_message = f"🔍 **Firefox Debug Results**\n\n"
+            debug_message += f"**System**: `{debug_info['system']}`\n"
+            debug_message += f"**Firefox Profiles Found**: `{debug_info['profiles_found']}`\n\n"
+            
+            if debug_info['cookie_files']:
+                debug_message += "**Cookie Files Found:**\n"
+                for i, cookie_file in enumerate(debug_info['cookie_files'][:5], 1):
+                    profile_name = os.path.basename(os.path.dirname(cookie_file))
+                    size = debug_info['cookie_file_sizes'].get(cookie_file, 0)
+                    debug_message += f"{i}. `{profile_name}` ({self._format_bytes(size)})\n"
+                    debug_message += f"   `{cookie_file}`\n"
+                
+                if len(debug_info['cookie_files']) > 5:
+                    debug_message += f"   ... and {len(debug_info['cookie_files']) - 5} more\n"
+            else:
+                debug_message += "**No Firefox cookie files found**\n"
+            
+            debug_message += f"\n**Selected Cookie File**: `{debug_info['selected_file'] or 'None'}`\n"
+            
+            if debug_info['instagram_cookies_count'] >= 0:
+                debug_message += f"**Instagram Cookies Found**: `{debug_info['instagram_cookies_count']}`\n"
+                if debug_info['sample_cookies']:
+                    debug_message += f"**Sample Cookie Names**: `{', '.join(debug_info['sample_cookies'])}`\n"
+            
+            if debug_info['errors']:
+                debug_message += f"\n**Errors Encountered**:\n"
+                for error in debug_info['errors'][:3]:
+                    debug_message += f"• `{error}`\n"
+                    
+            await update.message.reply_text(debug_message, parse_mode='Markdown')
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Debug failed: `{str(e)}`", parse_mode='Markdown')
+
+    def _debug_firefox_setup(self, firefox_profile: Optional[str] = None) -> dict:
+        """Debug Firefox setup - blocking function to run in thread."""
+        from platform import system
+        from glob import glob
+        import sqlite3
+        
+        debug_info = {
+            'system': system(),
+            'profiles_found': 0,
+            'cookie_files': [],
+            'cookie_file_sizes': {},
+            'selected_file': None,
+            'instagram_cookies_count': -1,
+            'sample_cookies': [],
+            'errors': []
+        }
+        
+        try:
+            # Find all Firefox cookie files
+            if system() == "Windows":
+                patterns = [
+                    "~/AppData/Roaming/Mozilla/Firefox/Profiles/*/cookies.sqlite",
+                    "~/AppData/Local/Mozilla/Firefox/Profiles/*/cookies.sqlite"
+                ]
+            elif system() == "Darwin":
+                patterns = ["~/Library/Application Support/Firefox/Profiles/*/cookies.sqlite"]
+            else:
+                patterns = [
+                    "~/.mozilla/firefox/*/cookies.sqlite",
+                    "~/snap/firefox/common/.mozilla/firefox/*/cookies.sqlite",
+                    "~/.var/app/org.mozilla.firefox/.mozilla/firefox/*/cookies.sqlite",
+                    "~/snap/firefox/current/.mozilla/firefox/*/cookies.sqlite"
+                ]
+            
+            for pattern in patterns:
+                expanded_pattern = os.path.expanduser(pattern)
+                cookiefiles = glob(expanded_pattern)
+                debug_info['cookie_files'].extend(cookiefiles)
+            
+            # Get file sizes
+            for cookie_file in debug_info['cookie_files']:
+                try:
+                    debug_info['cookie_file_sizes'][cookie_file] = os.path.getsize(cookie_file)
+                except OSError as e:
+                    debug_info['errors'].append(f"Could not get size of {cookie_file}: {e}")
+            
+            debug_info['profiles_found'] = len(debug_info['cookie_files'])
+            
+            # Select the most appropriate file
+            debug_info['selected_file'] = self._get_firefox_cookie_file_path(firefox_profile)
+            
+            # Try to read Instagram cookies from selected file
+            if debug_info['selected_file'] and os.path.exists(debug_info['selected_file']):
+                try:
+                    # Create temp copy to avoid lock issues
+                    temp_file = debug_info['selected_file'] + ".debug_temp"
+                    try:
+                        shutil.copy2(debug_info['selected_file'], temp_file)
+                        
+                        with sqlite3.connect(f"file:{temp_file}?mode=ro", uri=True) as conn:
+                            conn.row_factory = sqlite3.Row
+                            cursor = conn.cursor()
+                            
+                            cursor.execute(
+                                "SELECT name, value FROM moz_cookies WHERE baseDomain='instagram.com' OR host LIKE '%instagram.com%'"
+                            )
+                            cookies = cursor.fetchall()
+                            debug_info['instagram_cookies_count'] = len(cookies)
+                            debug_info['sample_cookies'] = [cookie['name'] for cookie in cookies[:5]]
+                            
+                    finally:
+                        if os.path.exists(temp_file):
+                            try:
+                                os.remove(temp_file)
+                            except OSError:
+                                pass
+                                
+                except Exception as e:
+                    debug_info['errors'].append(f"Could not read cookies: {e}")
+            
+        except Exception as e:
+            debug_info['errors'].append(f"General error: {e}")
+        
+        return debug_info
+
+    def _get_firefox_cookie_file_path(self, firefox_profile: Optional[str] = None) -> Optional[str]:
+        """
+        Get the path to Firefox cookies.sqlite file with enhanced detection.
+        """
+        from platform import system
+        from glob import glob
+        from pathlib import Path
+        
+        system_name = system()
+        home_dir = Path.home()
+        
+        # Check custom path first
+        if self.settings.firefox_cookies_path and os.path.exists(self.settings.firefox_cookies_path):
+            logger.info("Using custom Firefox cookies path", path=self.settings.firefox_cookies_path)
+            return self.settings.firefox_cookies_path
+        
+        # Define all possible Firefox profile locations
+        if system_name == "Windows":
+            base_patterns = [
+                "~/AppData/Roaming/Mozilla/Firefox/Profiles/*/cookies.sqlite",
+                "~/AppData/Local/Mozilla/Firefox/Profiles/*/cookies.sqlite"
+            ]
+        elif system_name == "Darwin":
+            base_patterns = [
+                "~/Library/Application Support/Firefox/Profiles/*/cookies.sqlite"
+            ]
+        else:  # Linux and other Unix-like systems
+            base_patterns = [
+                "~/.mozilla/firefox/*/cookies.sqlite",
+                "~/snap/firefox/common/.mozilla/firefox/*/cookies.sqlite",
+                "~/.var/app/org.mozilla.firefox/.mozilla/firefox/*/cookies.sqlite",
+                "~/snap/firefox/current/.mozilla/firefox/*/cookies.sqlite"
+            ]
+        
+        # If specific profile requested, filter for it
+        if firefox_profile and firefox_profile != "default":
+            profile_patterns = []
+            for pattern in base_patterns:
+                # Replace wildcard with specific profile pattern
+                profile_pattern = pattern.replace("/*", f"/*{firefox_profile}*")
+                profile_patterns.append(profile_pattern)
+            base_patterns = profile_patterns
+        
+        # Find all cookie files
+        all_cookie_files = []
+        for pattern in base_patterns:
+            expanded_pattern = os.path.expanduser(pattern)
+            logger.debug("Searching pattern", pattern=expanded_pattern)
+            cookiefiles = glob(expanded_pattern)
+            all_cookie_files.extend(cookiefiles)
+        
+        if not all_cookie_files:
+            logger.warning("No Firefox cookie files found", patterns=base_patterns)
+            return None
+        
+        # Sort by modification time (most recent first)
+        all_cookie_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+        
+        # Log all found files for debugging
+        logger.info("Found Firefox cookie files", count=len(all_cookie_files), files=[os.path.basename(os.path.dirname(f)) for f in all_cookie_files[:3]])
+        
+        return all_cookie_files[0]  # Return most recent
+
+    def _import_session_from_firefox(self, username: str, cookiefile: str) -> bool:
+        """
+        Import session from Firefox cookies using the official Instaloader method.
+        Based on: https://github.com/instaloader/instaloader/blob/master/docs/codesnippets/615_import_firefox_session.py
+        """
+        try:
+            logger.info("Attempting to import from Firefox cookie file", cookiefile=cookiefile)
+            
+            # Check if Firefox is running by trying to copy the database first
+            temp_cookiefile = None
+            try:
+                # Create a temporary copy to avoid "database is locked" errors
+                temp_cookiefile = cookiefile + ".temp"
+                shutil.copy2(cookiefile, temp_cookiefile)
+                actual_cookiefile = temp_cookiefile
+                logger.info("Created temporary copy of cookie database")
+            except (PermissionError, OSError) as copy_error:
+                logger.warning("Could not create temporary copy, trying direct access", error=str(copy_error))
+                actual_cookiefile = cookiefile
+            
+            # Create temporary Instaloader instance
+            L = instaloader.Instaloader()
+            
+            # Connect to Firefox cookie database
+            try:
+                with sqlite3.connect(f"file:{actual_cookiefile}?mode=ro", uri=True) as conn:
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.cursor()
+                    
+                    # Query Instagram cookies from Firefox database
+                    cursor.execute(
+                        "SELECT name, value FROM moz_cookies WHERE baseDomain='instagram.com' OR host LIKE '%instagram.com%'"
+                    )
+                    
+                    instagram_cookies = cursor.fetchall()
+                    
+                    if not instagram_cookies:
+                        logger.warning("No Instagram cookies found in Firefox database")
+                        
+                        # Debug: Check what domains are available
+                        cursor.execute("SELECT DISTINCT baseDomain FROM moz_cookies LIMIT 10")
+                        available_domains = [row[0] for row in cursor.fetchall()]
+                        logger.info("Available domains in Firefox cookies", domains=available_domains)
+                        return False
+                    
+                    # Import cookies into Instaloader session
+                    for cookie in instagram_cookies:
+                        L.context._session.cookies.set(
+                            cookie['name'], 
+                            cookie['value'], 
+                            domain='instagram.com'
+                        )
+                    
+                    logger.info(f"Imported {len(instagram_cookies)} Instagram cookies from Firefox")
+                    
+            except sqlite3.OperationalError as db_error:
+                if "database is locked" in str(db_error):
+                    logger.error("Firefox database is locked - please close Firefox completely and try again")
+                    return False
+                else:
+                    logger.error(f"Database error: {db_error}")
+                    return False
+            finally:
+                # Clean up temporary file
+                if temp_cookiefile and os.path.exists(temp_cookiefile):
+                    try:
+                        os.remove(temp_cookiefile)
+                        logger.debug("Cleaned up temporary cookie file")
+                    except OSError:
+                        pass
+            
+            # Test the session by getting username info
+            try:
+                # This will validate the session
+                profile = instaloader.Profile.from_username(L.context, username)
+                logger.info(f"Successfully validated session for user: {username}")
+                
+                # Save the session
+                L.save_session_to_file(username)
+                return True
+                
+            except instaloader.exceptions.LoginRequiredException:
+                logger.error("Session validation failed: Login required - cookies may be expired or invalid")
+                return False
+            except instaloader.exceptions.ProfileNotExistsException:
+                logger.error(f"Profile validation failed: Username '{username}' does not exist")
+                return False
+            except Exception as test_error:
+                logger.error(f"Session validation failed: {test_error}")
+                return False
+                    
+        except Exception as e:
+            logger.error(f"Failed to import Firefox session: {e}")
+            return False
+
+    def _try_browser_cookie3_method(self, username: str) -> bool:
+        """
+        Try using browser_cookie3 library as alternative method.
+        """
+        try:
+            try:
+                import browser_cookie3
+            except ImportError:
+                logger.info("browser_cookie3 not installed, skipping alternative method")
+                return False
+            
+            # Create Instaloader instance
+            L = instaloader.Instaloader()
+            
+            # Get Instagram cookies from Firefox using browser_cookie3
+            firefox_cookies = browser_cookie3.firefox(domain_name='instagram.com')
+            
+            cookie_count = 0
+            for cookie in firefox_cookies:
+                L.context._session.cookies.set(
+                    cookie.name, 
+                    cookie.value, 
+                    domain='instagram.com'
+                )
+                cookie_count += 1
+            
+            if cookie_count == 0:
+                logger.warning("No Instagram cookies found via browser_cookie3")
+                return False
+            
+            logger.info(f"Imported {cookie_count} Instagram cookies via browser_cookie3")
+            
+            # Test and save session
+            try:
+                profile = instaloader.Profile.from_username(L.context, username)
+                L.save_session_to_file(username)
+                logger.info(f"Successfully validated session for user: {username}")
+                return True
+            except Exception as test_error:
+                logger.error(f"Session validation failed: {test_error}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"browser_cookie3 method failed: {e}")
+            return False
+
     def _get_firefox_cookie_file_path(self, firefox_profile: Optional[str] = None) -> Optional[str]:
         """
         Get the path to Firefox cookies.sqlite file.
@@ -1660,20 +2067,47 @@ class EnhancedTelegramBot:
             except Exception as e:
                 logger.error("Error during shutdown", error=str(e))
 
-    async def _safe_edit_message(self, message, new_text: str, max_retries: int = 3) -> bool:
+    async def _safe_edit_message(self, message, new_text: str, max_retries: int = None) -> bool:
         """Safely edit a message with retry logic."""
+        if max_retries is None:
+            max_retries = self.settings.status_max_retries
+           
         for attempt in range(max_retries):
             try:
+                # Rate limiting check before editing
+                await self._rate_limit_check()
                 await message.edit_text(new_text)
                 return True
             except RetryAfter as e:
-                if attempt < max_retries - 1:  # Don't sleep on last attempt
-                    await asyncio.sleep(e.retry_after)
-            except TelegramError as e:
-                logger.warning("Failed to edit message", error=str(e), attempt=attempt + 1)
-                if attempt >= max_retries - 1:
+                wait_time = max(e.retry_after, self.settings.flood_control_base_delay * (2 ** attempt))
+                logger.warning("Rate limited while editing message", wait_time=wait_time, attempt=attempt + 1)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(wait_time)
+            except (NetworkError, httpx.ConnectError) as e:
+                if attempt < max_retries - 1:
+                    wait_time = self.settings.message_edit_retry_delay * (2 ** attempt)
+                    logger.warning("Network error editing message, retrying", error=str(e), wait_time=wait_time)
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error("Failed to edit message after all retries due to network error", error=str(e))
                     return False
-                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+            except TelegramError as e:
+                if "message is not modified" in str(e).lower():
+                    logger.debug("Message content unchanged, skipping edit")
+                    return True
+                    
+                logger.warning("Telegram error editing message", error=str(e), attempt=attempt + 1)
+                if attempt < max_retries - 1:
+                    wait_time = self.settings.message_edit_retry_delay * (2 ** attempt)
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error("Failed to edit message after all retries", error=str(e))
+                    return False
+            except Exception as e:
+                logger.error("Unexpected error editing message", error=str(e), attempt=attempt + 1)
+                if attempt == max_retries - 1:
+                    return False
+                await asyncio.sleep(self.settings.message_edit_retry_delay)
         return False
 
 
@@ -1697,9 +2131,21 @@ async def main():
         
         await bot.bot_app.initialize()
         await bot.bot_app.start()
-        await bot.bot_app.updater.start_polling()
+        
+        # Start polling with enhanced error handling
+        try:
+            await bot.bot_app.updater.start_polling(
+                drop_pending_updates=True,  # Drop pending updates on startup
+                error_callback=lambda error: logger.error("Polling error", error=str(error))
+            )
+        except Exception as e:
+            logger.error("Failed to start polling", error=str(e))
+            raise
 
         logger.info("Bot is now running. Press Ctrl+C to stop.")
+
+        # Add small delay to ensure proper startup
+        await asyncio.sleep(0.5)
 
         # Wait indefinitely until the shutdown_event is set
         await shutdown_event
@@ -1707,6 +2153,13 @@ async def main():
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutdown signal received. Starting graceful shutdown...")
     finally:
+        # Set the shutdown event to break the main loop
+        if not shutdown_event.done():
+            shutdown_event.set_result(None)
+        
+        # Give a moment for any pending operations to complete
+        await asyncio.sleep(0.1)
+        
         # Stop the updater first to prevent new updates from coming in
         if bot.bot_app and bot.bot_app.updater and bot.bot_app.updater.running:
             await bot.bot_app.updater.stop()
