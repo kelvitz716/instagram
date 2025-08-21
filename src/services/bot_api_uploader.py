@@ -59,7 +59,14 @@ class BotAPIUploader(UploaderBase):
             return False
             
         try:
-            async with httpx.AsyncClient(proxies=self.proxy) as client:
+            # Set up client with proxy if configured
+            client_kwargs = {}
+            if self.proxy:
+                client_kwargs['proxies'] = {
+                    'http://': self.proxy,
+                    'https://': self.proxy
+                }
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 with open(file_path, "rb") as file:
                     files = {
                         method.replace("send", "").lower(): (
