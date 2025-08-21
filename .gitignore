@@ -7,3 +7,6 @@ telegram_bot_session.session-journal
 __pycache__/bot.cpython-313.pyc
 bot.py
 downloads/*
+Telegram Bot Code Optimization & Improvement Analysis.pdf
+telegram_bot_improvements.md
+utils/__pycache__/progress_tracker.cpython-313.pyc
