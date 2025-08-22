@@ -1,12 +1,16 @@
 from pathlib import Path
 from typing import Optional, Dict, List, Union
+import asyncio
 import logging
 import mimetypes
 import httpx
 from ..core.retry import RetryableOperation
 from .upload import UploaderBase, UploadResult
+from .rate_limiter import RateLimiterRegistry
 
 logger = logging.getLogger(__name__)
+# Global rate limiter registry
+_rate_limiters = RateLimiterRegistry()
 
 class BotAPIUploader(UploaderBase):
     """Handles file uploads through Telegram Bot API"""
@@ -131,6 +135,11 @@ class BotAPIUploader(UploaderBase):
             method = self._get_upload_method(mime_type)
             if not method:
                 return UploadResult(False, error=f"Unsupported mime type: {mime_type}")
+            
+            # Get rate limiter for this method
+            limiter = _rate_limiters.get_limiter(method)
+            # Wait for rate limit
+            await limiter.acquire()
 
             # Set up client with proxy if configured
             client_kwargs = {}
@@ -153,23 +162,40 @@ class BotAPIUploader(UploaderBase):
                     if caption:
                         data["caption"] = caption
 
-                    response = await client.post(
-                        f"{self.api_url}/{method}",
-                        files=files,
-                        data=data
-                    )
+                    try:
+                        response = await client.post(
+                            f"{self.api_url}/{method}",
+                            files=files,
+                            data=data
+                        )
+                    
+                        if response.status_code == 429:  # Rate limit hit
+                            retry_after = response.json().get('parameters', {}).get('retry_after', 10)
+                            logger.info(f"Rate limit hit, waiting {retry_after} seconds")
+                            await asyncio.sleep(retry_after)
+                            # Try again after waiting
+                            await limiter.acquire()
+                            response = await client.post(
+                                f"{self.api_url}/{method}",
+                                files=files,
+                                data=data
+                            )
 
-                    if response.status_code == 200:
-                        response_data = response.json()
-                        if response_data.get('ok'):
-                            result = response_data.get('result', {})
-                            message_id = result.get('message_id')
-                            return UploadResult(True, message_id=message_id, file_size=file_size)
+                        if response.status_code == 200:
+                            response_data = response.json()
+                            if response_data.get('ok'):
+                                result = response_data.get('result', {})
+                                message_id = result.get('message_id')
+                                return UploadResult(True, message_id=message_id, file_size=file_size)
+                            else:
+                                error = response_data.get('description', 'Unknown error')
+                                return UploadResult(False, error=error)
                         else:
-                            error = response_data.get('description', 'Unknown error')
-                            return UploadResult(False, error=error)
-                    else:
-                        return UploadResult(False, error=f"Upload failed with status {response.status_code}: {response.text}")
+                            return UploadResult(False, error=f"Upload failed with status {response.status_code}: {response.text}")
+
+                    except httpx.ReadTimeout:
+                        logger.warning(f"Upload timed out for {file_path}")
+                        return UploadResult(False, error="Upload timed out")
 
         except Exception as e:
             logger.error(f"Upload failed: {e}", exc_info=True)

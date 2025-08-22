@@ -1,20 +1,42 @@
 #!/usr/bin/env python3
 """
-Enhanced Telegram Bot with service-based architecture and optimized performance.
+Instagram Content Downloader Bot
+
+A Telegram bot that automatically detects and downloads content from Instagram URLs.
+Supports posts, reels, stories, highlights, and profiles with optimized performance
+and service-based architecture.
+
+Features:
+- Automatic URL detection and content type identification
+- Support for multiple Instagram content types
+- Optimized download and upload handling
+- Progress tracking and status updates
+- Database logging and statistics
+- Periodic cleanup of downloaded files
+
+Author: @kelvitz716
+Version: 2.0.0
 """
+
+# Standard library imports
 import asyncio
 import logging
-import structlog
-from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
-from functools import lru_cache
-from rich.console import Console
 import re
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+# Third-party imports
+import structlog
+from rich.console import Console
+from telegram import Message, Update
+from telegram.ext import (
+    Application, CommandHandler, ContextTypes, MessageHandler, filters
+)
+from telegram import error as telegram_error
 from telethon import TelegramClient
 
+# Local application imports
 from src.core.config import BotConfig
 from src.core.services import BotServices
 from src.services.database import DatabaseService
@@ -23,6 +45,29 @@ from src.services.bot_api_uploader import BotAPIUploader
 from src.services.telethon_uploader import TelethonUploader
 from src.services.instagram_downloader import InstagramDownloader
 from src.services.progress import ProgressTracker
+
+# Global constants for optimization
+CONTENT_ICONS = {
+    'post': '📷',
+    'reel': '🎬', 
+    'story': '📱',
+    'highlight': '⭐',
+    'profile': '👤',
+    'tv': '📺',
+    'unknown': '📄'
+}
+
+# Base URL pattern components for optimization
+BASE_INSTAGRAM = r'https?://(?:www\.)?'
+INSTAGRAM_DOMAINS = ['instagram.com', 'instagr.am']
+PATH_END = r'(?:/.*)?$'
+
+# Regular expressions pre-compiled for performance
+URL_PATTERN = re.compile(r'https?://[^\s]+', re.I)
+INSTAGRAM_URL_PATTERN = re.compile(
+    r'https?://(?:www\.)?(?:instagram\.com|instagr\.am)/[a-zA-Z0-9_/.-]+',
+    re.I
+)
 
 # Optimize logging configuration
 structlog.configure(
@@ -42,33 +87,31 @@ console = Console()
 BOT_VERSION = "2.0.0"
 
 class ContentDetector:
-    """Enhanced content detection for Instagram URLs"""
+    """Enhanced content detection for Instagram URLs with pattern matching."""
     
-    # Comprehensive URL patterns for different Instagram content types
+    # Pre-compile patterns for better performance
     PATTERNS = {
         'post': [
-            r'https?://(?:www\.)?instagram\.com/p/([A-Za-z0-9_-]+)(?:/.*)?$',
-            r'https?://(?:www\.)?instagr\.am/p/([A-Za-z0-9_-]+)(?:/.*)?$'
+            re.compile(f"{BASE_INSTAGRAM}{domain}/p/([A-Za-z0-9_-]+){PATH_END}", re.I)
+            for domain in INSTAGRAM_DOMAINS
         ],
         'reel': [
-            r'https?://(?:www\.)?instagram\.com/reel/([A-Za-z0-9_-]+)(?:/.*)?$',
-            r'https?://(?:www\.)?instagram\.com/reels/([A-Za-z0-9_-]+)(?:/.*)?$',
-            r'https?://(?:www\.)?instagr\.am/reel/([A-Za-z0-9_-]+)(?:/.*)?$'
+            *[re.compile(f"{BASE_INSTAGRAM}instagram.com/reel(?:s)?/([A-Za-z0-9_-]+){PATH_END}", re.I)],
+            *[re.compile(f"{BASE_INSTAGRAM}instagr.am/reel/([A-Za-z0-9_-]+){PATH_END}", re.I)]
         ],
         'story': [
-            r'https?://(?:www\.)?instagram\.com/stories/([a-zA-Z0-9_.]+)/(\d+)(?:/.*)?$',
-            r'https?://(?:www\.)?instagram\.com/stories/([a-zA-Z0-9_.]+)/?$'
+            re.compile(f"{BASE_INSTAGRAM}instagram.com/stories/([a-zA-Z0-9_.]+)(?:/([0-9]+))?{PATH_END}", re.I)
         ],
         'highlight': [
-            r'https?://(?:www\.)?instagram\.com/stories/highlights/(\d+)(?:/.*)?$',
-            r'https?://(?:www\.)?instagram\.com/s/([A-Za-z0-9_-]+)(?:/.*)?$'
+            re.compile(f"{BASE_INSTAGRAM}instagram.com/stories/highlights/([0-9]+){PATH_END}", re.I),
+            re.compile(f"{BASE_INSTAGRAM}instagram.com/s/([A-Za-z0-9_-]+){PATH_END}", re.I)
         ],
         'profile': [
-            r'https?://(?:www\.)?instagram\.com/([a-zA-Z0-9_.]+)/?$',
-            r'https?://(?:www\.)?instagr\.am/([a-zA-Z0-9_.]+)/?$'
+            re.compile(f"{BASE_INSTAGRAM}{domain}/([a-zA-Z0-9_.]+)/?$", re.I)
+            for domain in INSTAGRAM_DOMAINS
         ],
         'tv': [
-            r'https?://(?:www\.)?instagram\.com/tv/([A-Za-z0-9_-]+)(?:/.*)?$'
+            re.compile(f"{BASE_INSTAGRAM}instagram.com/tv/([A-Za-z0-9_-]+){PATH_END}", re.I)
         ]
     }
     
@@ -77,8 +120,14 @@ class ContentDetector:
         """
         Detect Instagram content type from URL.
         
+        Args:
+            url (str): Instagram URL to analyze
+            
         Returns:
-            Tuple of (content_type, identifier, secondary_identifier)
+            Tuple[str, str, Optional[str]]: (content_type, identifier, secondary_identifier)
+            
+        Note:
+            Uses pre-compiled regex patterns for better performance
         """
         # Clean the URL
         url = url.strip()
@@ -86,7 +135,8 @@ class ContentDetector:
         # Check each content type pattern
         for content_type, patterns in cls.PATTERNS.items():
             for pattern in patterns:
-                match = re.match(pattern, url, re.IGNORECASE)
+                # Patterns are pre-compiled, no need to pass flags
+                match = pattern.match(url)
                 if match:
                     groups = match.groups()
                     identifier = groups[0] if groups else ""
@@ -102,13 +152,17 @@ class ContentDetector:
     
     @classmethod
     def is_instagram_url(cls, url: str) -> bool:
-        """Check if URL is a valid Instagram URL"""
-        instagram_domains = [
-            r'https?://(?:www\.)?instagram\.com/',
-            r'https?://(?:www\.)?instagr\.am/'
-        ]
+        """
+        Check if URL is a valid Instagram URL
         
-        return any(re.match(domain, url, re.IGNORECASE) for domain in instagram_domains)
+        Args:
+            url (str): URL to validate
+            
+        Returns:
+            bool: True if URL is a valid Instagram URL
+        """
+        # Use pre-compiled pattern for validation
+        return bool(INSTAGRAM_URL_PATTERN.match(url))
     
     @classmethod
     def normalize_url(cls, url: str) -> str:
@@ -127,9 +181,29 @@ class ContentDetector:
         return url
 
 class EnhancedTelegramBot:
-    """Enhanced Telegram bot with optimized service architecture."""
+    """
+    Enhanced Telegram bot with optimized service architecture for Instagram content.
+    
+    This class manages the main bot functionality including:
+    - Service initialization and management
+    - Message handling and content detection
+    - File download and upload operations
+    - Database logging and cleanup
+    
+    Attributes:
+        config (BotConfig): Bot configuration including API keys and settings
+        services (BotServices): Service container for all bot services
+        detector (ContentDetector): Instagram URL detection and parsing
+        _cache (Dict[str, Any]): Internal cache for optimization
+    """
 
-    def __init__(self, config: BotConfig):
+    def __init__(self, config: BotConfig) -> None:
+        """
+        Initialize the bot with configuration and services.
+        
+        Args:
+            config (BotConfig): Bot configuration instance containing all settings
+        """
         self.config = config
         self.services = BotServices.create(config)
         self.detector = ContentDetector()
@@ -137,7 +211,17 @@ class EnhancedTelegramBot:
         self._cache: Dict[str, Any] = {}
         
     def _setup_directories(self) -> None:
-        """Setup required directories with error handling."""
+        """
+        Setup required directories for bot operation with error handling.
+        
+        Creates directories for:
+        - Downloads: Temporary storage for downloaded content
+        - Uploads: Staging area for content to be uploaded
+        - Temp: General temporary file storage
+        
+        Raises:
+            Exception: If directory creation fails
+        """
         try:
             for path in [self.config.downloads_path, self.config.uploads_path, self.config.temp_path]:
                 path.mkdir(parents=True, exist_ok=True)
@@ -147,11 +231,30 @@ class EnhancedTelegramBot:
             
     @lru_cache(maxsize=1)
     def _get_uploader(self, file_size: int) -> str:
-        """Cached decision for uploader selection based on file size."""
+        """
+        Get the appropriate uploader based on file size with caching.
+        
+        Args:
+            file_size (int): Size of the file in bytes
+            
+        Returns:
+            str: 'telethon' for large files, 'bot_api' for smaller files
+        """
         return 'telethon' if file_size > self.config.upload.large_file_threshold else 'bot_api'
 
     async def initialize(self) -> None:
-        """Initialize bot services sequentially."""
+        """
+        Initialize bot services in a specific sequence.
+        
+        Sequence:
+        1. Database initialization
+        2. Telegram client setup
+        3. Upload services configuration
+        4. Instagram service setup
+        
+        Raises:
+            Exception: If any initialization step fails
+        """
         try:
             # Initialize components sequentially to avoid race conditions
             await self._initialize_database()
@@ -180,10 +283,9 @@ class EnhancedTelegramBot:
         from src.services.cleanup import CleanupService
         self.cleanup_service = CleanupService(downloads_path)
         
-    def _extract_urls_from_text(self, text: str) -> list:
-        """Extract URLs from text message."""
-        url_pattern = r'https?://[^\s]+'
-        return re.findall(url_pattern, text)
+    def _extract_urls_from_text(self, text: str) -> List[str]:
+        """Extract URLs from text message using pre-compiled pattern."""
+        return URL_PATTERN.findall(text)
         
     def _schedule_cleanup(self) -> None:
         """Schedule periodic cleanup of downloads directory"""
@@ -288,17 +390,13 @@ class EnhancedTelegramBot:
 
     def _setup_handlers(self) -> None:
         """Set up command handlers and message handlers."""
-        from telegram.ext import MessageHandler, filters
-        
         # Add message handler for Instagram URLs with enhanced pattern matching first
         # This ensures URL processing takes precedence over other handlers
         self.bot_app.add_handler(
             MessageHandler(
                 (filters.TEXT | filters.CAPTION) &  # Handle both text messages and captions
                 ~filters.COMMAND &
-                filters.Regex(
-                    r'https?://(?:www\.)?(?:instagram\.com|instagr\.am)/[a-zA-Z0-9_/.-]+'
-                ),
+                filters.Regex(INSTAGRAM_URL_PATTERN.pattern),
                 self.handle_message,
                 block=False  # Non-blocking to handle multiple URLs
             ),
@@ -427,6 +525,37 @@ class EnhancedTelegramBot:
         
         await update.message.reply_text(response, parse_mode='Markdown')
 
+    async def _safe_edit_message(self, message: Message, text: str, retry_after: Optional[int] = None) -> bool:
+        """
+        Safely edit a message with rate limit handling.
+        
+        Args:
+            message (Message): Message to edit
+            text (str): New message text
+            retry_after (Optional[int]): Override for retry delay in seconds
+            
+        Returns:
+            bool: True if edit was successful, False if rate limited
+        """
+        try:
+            await message.edit_text(text)
+            return True
+            
+        except telegram_error.RetryAfter as e:
+            retry_after = retry_after or e.retry_after
+            logger.warning(f"Rate limited, waiting {retry_after}s", error=str(e))
+            await asyncio.sleep(retry_after + 1)  # Add 1s buffer
+            
+            try:
+                await message.edit_text(text)
+                return True
+            except Exception:
+                return False
+                
+        except Exception as e:
+            logger.error("Failed to edit message", error=str(e))
+            return False
+
     async def _process_download(self, update: Update, url: str, content_type: str = None, 
                               identifier: str = None, secondary: str = None) -> None:
         """Enhanced download processing with content type awareness."""
@@ -450,29 +579,30 @@ class EnhancedTelegramBot:
             icon = content_icons.get(content_type, '📄')
             content_name = content_type.replace('_', ' ').title()
             
-            status_message = await update.message.reply_text(
-                f"{icon} Detected: {content_name}\n⏬ Starting download..."
-            )
+            # Send initial status with error handling
+            try:
+                status_message = await update.message.reply_text(
+                    f"{icon} Detected: {content_name}\n⏬ Starting download..."
+                )
+            except telegram_error.RetryAfter as e:
+                # If rate limited on first message, wait and try again
+                await asyncio.sleep(e.retry_after + 1)
+                status_message = await update.message.reply_text(
+                    f"{icon} Detected: {content_name}\n⏬ Starting download..."
+                )
             
-            # Special handling for different content types
+            # Special handling for different content types with rate limit handling
+            msg_text = ""
             if content_type == 'profile':
-                await status_message.edit_text(
-                    f"👤 Profile detected: @{identifier}\n"
-                    "Note: Profile downloads will get recent posts. Use specific post URLs for individual content."
-                )
+                msg_text = f"👤 Profile detected: @{identifier}\nNote: Profile downloads will get recent posts. Use specific post URLs for individual content."
             elif content_type in ['story', 'highlight']:
-                await status_message.edit_text(
-                    f"{icon} Downloading {content_name}...\n"
-                    "📝 Note: Stories/Highlights require Instagram login"
-                )
+                msg_text = f"{icon} Downloading {content_name}...\n📝 Note: Stories/Highlights require Instagram login"
             elif content_type == 'unknown':
-                await status_message.edit_text(
-                    "❓ Unknown content type detected\n⏬ Attempting download..."
-                )
+                msg_text = "❓ Unknown content type detected\n⏬ Attempting download..."
             else:
-                await status_message.edit_text(
-                    f"{icon} Downloading {content_name}..."
-                )
+                msg_text = f"{icon} Downloading {content_name}..."
+                
+            await self._safe_edit_message(status_message, msg_text)
             
             # Download content using unified method
             downloaded_files = await self.instagram_downloader.download_content(url)
@@ -480,12 +610,12 @@ class EnhancedTelegramBot:
                 error_msg = f"❌ Failed to download {content_name.lower()}"
                 if content_type in ['story', 'highlight']:
                     error_msg += "\n💡 Tip: Make sure you're logged into Instagram for stories/highlights"
-                await status_message.edit_text(error_msg)
+                await self._safe_edit_message(status_message, error_msg)
                 return
                 
-            await status_message.edit_text(
-                f"✅ Downloaded {len(downloaded_files)} files\n"
-                f"📤 Starting upload..."
+            await self._safe_edit_message(
+                status_message,
+                f"✅ Downloaded {len(downloaded_files)} files\n📤 Starting upload..."
             )
             
             # Extract metadata for the first file
@@ -511,7 +641,7 @@ class EnhancedTelegramBot:
             else:
                 final_message += "\n❌ Upload failed"
                 
-            await status_message.edit_text(final_message)
+            await self._safe_edit_message(status_message, final_message)
             
         except Exception as e:
             error_msg = str(e)
@@ -519,7 +649,7 @@ class EnhancedTelegramBot:
             
             if status_message:
                 content_name = content_type.replace('_', ' ').title() if content_type else 'content'
-                await status_message.edit_text(f"❌ Error downloading {content_name}: {error_msg}")
+                await self._safe_edit_message(status_message, f"❌ Error downloading {content_name}: {error_msg}")
             
             await self.services.database_service.log_file_operation(
                 url, 0, 'download', False, error_msg
@@ -569,58 +699,148 @@ class EnhancedTelegramBot:
         
         return caption
 
-    async def _upload_files_with_progress(self, files: list, caption: str, 
-                                        status_message, content_type: str) -> int:
-        """Upload files with progress tracking and content type awareness."""
+    async def _upload_files_with_progress(
+        self, 
+        files: List[Path], 
+        caption: str,
+        status_message: Message, 
+        content_type: str
+    ) -> int:
+        """
+        Upload files with progress tracking and content type awareness.
+        
+        Args:
+            files (List[Path]): List of files to upload
+            caption (str): Base caption for media files
+            status_message (Message): Message to update with progress
+            content_type (str): Type of content being uploaded
+            
+        Returns:
+            int: Number of successfully uploaded files
+            
+        Note:
+            Files are uploaded in batches to optimize performance and handle rate limits
+        """
         successful = 0
         batch_size = self.config.upload.batch_size
         total_files = len(files)
+        retry_delay = 1  # Start with 1 second delay between uploads
         
         for i in range(0, len(files), batch_size):
-            batch = files[i:i + batch_size]
-            upload_tasks = []
-            
-            # Update progress
-            batch_start = i + 1
-            batch_end = min(i + batch_size, total_files)
-            await status_message.edit_text(
-                f"📤 Uploading files {batch_start}-{batch_end}/{total_files}..."
-            )
-            
-            for idx, file in enumerate(batch, start=i+1):
-                file_size = file.stat().st_size
-                uploader = self._get_uploader(file_size)
+            try:
+                batch = files[i:i + batch_size]
+                batch_start = i + 1
+                batch_end = min(i + batch_size, total_files)
                 
-                # Create file-specific caption
-                if idx == 1:
-                    file_caption = f"{caption}\n\n📌 Media {idx}/{total_files}"
-                else:
-                    file_caption = f"Media {idx}/{total_files}"
-                    if content_type in ['post', 'reel'] and total_files > 1:
-                        file_caption += f" - Part of {content_type}"
-                
-                upload_tasks.append(self.services.file_service.upload_file(
-                    file,
-                    method=uploader,
-                    caption=file_caption
-                ))
-            
-            # Execute batch upload
-            results = await asyncio.gather(*upload_tasks, return_exceptions=True)
-            
-            # Process results
-            for file, result in zip(batch, results):
-                success = isinstance(result, bool) and result
-                await self.services.database_service.log_file_operation(
-                    str(file),
-                    file.stat().st_size,
-                    'upload',
-                    success,
-                    None if success else str(result) if not isinstance(result, bool) else "Upload failed"
+                # Update progress with rate limit handling
+                await self._safe_edit_message(
+                    status_message,
+                    f"📤 Uploading files {batch_start}-{batch_end}/{total_files}..."
                 )
-                if success:
-                    successful += 1
+                
+                # Upload files sequentially for better rate limit handling
+                for idx, file in enumerate(batch, start=i+1):
+                    file_size = file.stat().st_size
+                    uploader = self._get_uploader(file_size)
                     
+                    # Create file-specific caption
+                    if idx == 1:
+                        file_caption = f"{caption}\n\n📌 Media {idx}/{total_files}"
+                    else:
+                        file_caption = f"Media {idx}/{total_files}"
+                        if content_type in ['post', 'reel'] and total_files > 1:
+                            file_caption += f" - Part of {content_type}"
+                    
+                    # Try to upload with retries
+                    max_retries = 3
+                    for retry in range(max_retries):
+                        try:
+                            result = await self.services.file_service.upload_file(
+                                file,
+                                method=uploader,
+                                caption=file_caption
+                            )
+                            
+                            # Process result
+                            if result:
+                                successful += 1
+                                retry_delay = max(1, retry_delay / 2)  # Decrease delay on success
+                            else:
+                                retry_delay = min(60, retry_delay * 2)  # Double delay on failure
+                            
+                            # Log operation
+                            await self.services.database_service.log_file_operation(
+                                str(file),
+                                file.stat().st_size,
+                                'upload',
+                                bool(result),
+                                None if result else "Upload failed"
+                            )
+                            
+                            break  # Success, no need to retry
+                            
+                        except telegram_error.RetryAfter as e:
+                            if retry < max_retries - 1:
+                                logger.warning(
+                                    f"Rate limited on file {idx}, waiting {e.retry_after}s",
+                                    retry=retry+1,
+                                    file=str(file)
+                                )
+                                # Update status to inform user
+                                await self._safe_edit_message(
+                                    status_message,
+                                    f"⏳ Rate limited, waiting {e.retry_after}s...\n"
+                                    f"📤 Uploading files {batch_start}-{batch_end}/{total_files}"
+                                )
+                                await asyncio.sleep(e.retry_after + 1)
+                                retry_delay = e.retry_after  # Use the server's suggested delay
+                                continue
+                            else:
+                                raise  # Max retries reached
+                                
+                        except Exception as e:
+                            logger.error(
+                                f"Upload error on file {idx}",
+                                error=str(e),
+                                file=str(file)
+                            )
+                            # Log failed operation
+                            await self.services.database_service.log_file_operation(
+                                str(file),
+                                file.stat().st_size,
+                                'upload',
+                                False,
+                                str(e)
+                            )
+                            break  # Skip this file
+                            
+                    # Wait between files to avoid rate limits
+                    if idx < batch_end:
+                        await asyncio.sleep(retry_delay)
+                        
+            except telegram_error.RetryAfter as e:
+                logger.warning(
+                    f"Batch upload rate limited, waiting {e.retry_after}s",
+                    batch_start=batch_start,
+                    batch_end=batch_end
+                )
+                await self._safe_edit_message(
+                    status_message,
+                    f"⏳ Rate limited, waiting {e.retry_after}s before next batch..."
+                )
+                await asyncio.sleep(e.retry_after + 1)
+                retry_delay = e.retry_after
+                i -= batch_size  # Retry this batch
+                continue
+                
+            except Exception as e:
+                logger.error("Batch upload failed", error=str(e))
+                await self._safe_edit_message(
+                    status_message,
+                    f"⚠️ Error uploading batch {batch_start}-{batch_end}: {str(e)}"
+                )
+                continue
+                
         return successful
 
     async def handle_download_instagram(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -688,13 +908,27 @@ class EnhancedTelegramBot:
             logger.error("Error during shutdown", error=str(e))
 
 async def main() -> None:
-    """Initialize and run the bot with optimized startup."""
+    """
+    Initialize and run the bot with optimized startup sequence.
+    
+    The startup sequence:
+    1. Load configuration
+    2. Create bot instance
+    3. Initialize services
+    4. Start bot application
+    5. Configure cleanup jobs
+    6. Wait for interruption
+    
+    The bot runs until interrupted by CTRL+C or system signal.
+    All cleanup operations are handled in the shutdown sequence.
+    """
     from src.core.load_config import load_configuration
     
     config = load_configuration()
     bot = EnhancedTelegramBot(config)
     
     try:
+        # Initialize all components sequentially
         await bot.initialize()
         await bot.bot_app.initialize()
         await bot.bot_app.start()
@@ -709,21 +943,39 @@ async def main() -> None:
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        # Ensure proper cleanup on shutdown
         await bot.shutdown()
 
 def run_bot() -> None:
-    """Run the bot with proper event loop and error handling."""
+    """
+    Run the bot with proper event loop and comprehensive error handling.
+    
+    This function:
+    1. Configures logging
+    2. Sets up the asyncio event loop
+    3. Runs the main bot function
+    4. Handles interruptions and errors gracefully
+    
+    Raises:
+        Exception: Re-raises any unhandled exceptions after logging
+    """
     try:
+        # Configure logging with timestamp and level information
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
+        
+        # Run the bot in the asyncio event loop
         asyncio.run(main())
+        
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
+        
     except Exception as e:
+        # Log any unhandled exceptions
         logger.error(f"Bot error: {e}", exc_info=True)
-        raise
+        raise  # Re-raise the exception for proper error reporting
 
 if __name__ == "__main__":
     run_bot()

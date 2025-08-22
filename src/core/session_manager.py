@@ -1,6 +1,7 @@
 """Session manager for Instagram cookie management."""
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import browser_cookie3
@@ -37,36 +38,69 @@ class InstagramSessionManager:
         self._last_cookie_refresh = None  # Timestamp of last successful cookie refresh
         self._load_cookies()
     
-    def _load_cookies(self) -> None:
-        """Load cookies from Firefox and validate them."""
-        try:
-            logger.info("Loading Instagram cookies from Firefox...")
-            cookies = browser_cookie3.firefox()
-            
-            # Clear existing cookies
-            old_cookies = self._session_cookies.copy()
-            self._session_cookies.clear()
-            
-            # Load new cookies
-            for cookie in cookies:
-                if cookie.domain == self.COOKIE_DOMAIN:
-                    masked_value = f"{str(cookie.value)[:10]}..."
-                    logger.debug(f"Found cookie: {cookie.name} = {masked_value}")
-                    self._session_cookies[cookie.name] = cookie.value
+    def _load_cookies(self, max_retries: int = 3, initial_delay: float = 1.0) -> None:
+        """Load cookies from Firefox and validate them with retries.
+        
+        Args:
+            max_retries: Maximum number of retry attempts
+            initial_delay: Initial delay between retries (doubles with each retry)
+        """
+        last_error = None
+        delay = initial_delay
 
-            # Check if cookies actually changed
-            if self._session_cookies != old_cookies:
-                self._last_cookie_refresh = datetime.now()
-                logger.info("Cookies were refreshed")
-            
-            # Verify and log found cookies
-            self._validate_cookies()
-            
-            logger.info("Successfully loaded Instagram cookies from Firefox")
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt > 0:
+                    logger.info(f"Retrying cookie load (attempt {attempt}/{max_retries})")
 
-        except Exception as e:
-            logger.error(f"Failed to load Firefox cookies: {str(e)}")
-            raise InstagramSessionError("Failed to load Instagram cookies from Firefox") from e
+                logger.info("Loading Instagram cookies from Firefox...")
+                cookies = browser_cookie3.firefox()
+                
+                # Clear existing cookies
+                old_cookies = self._session_cookies.copy()
+                self._session_cookies.clear()
+                
+                # Load new cookies
+                for cookie in cookies:
+                    if cookie.domain == self.COOKIE_DOMAIN:
+                        masked_value = f"{str(cookie.value)[:10]}..."
+                        logger.debug(f"Found cookie: {cookie.name} = {masked_value}")
+                        self._session_cookies[cookie.name] = cookie.value
+
+                # Check if cookies actually changed
+                if self._session_cookies != old_cookies:
+                    self._last_cookie_refresh = datetime.now()
+                    logger.info("Cookies were refreshed")
+                elif not self._session_cookies:
+                    raise InstagramSessionError("No Instagram cookies found in Firefox. Please ensure you're logged in.")
+                
+                # Verify and log found cookies
+                self._validate_cookies()
+                
+                logger.info("Successfully loaded Instagram cookies from Firefox")
+                return  # Success!
+
+            except (browser_cookie3.BrowserCookieError, PermissionError) as e:
+                last_error = f"Browser access error: {str(e)}. Please ensure Firefox is not running in private mode."
+                logger.warning(f"Cookie load attempt {attempt + 1} failed: {last_error}")
+            except InstagramSessionError as e:
+                if e.is_rate_limit:
+                    raise  # Don't retry rate limit errors
+                last_error = str(e)
+                logger.warning(f"Cookie load attempt {attempt + 1} failed: {last_error}")
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"Cookie load attempt {attempt + 1} failed: {last_error}")
+            
+            if attempt < max_retries:
+                import time
+                time.sleep(delay)
+                delay *= 2  # Exponential backoff
+            
+        # All retries failed
+        error_msg = f"Failed to load Instagram cookies after {max_retries} attempts. Last error: {last_error}"
+        logger.error(error_msg)
+        raise InstagramSessionError(error_msg)
     
     def _validate_cookies(self) -> None:
         """Validate required cookies and log their presence.
@@ -130,38 +164,62 @@ class InstagramSessionManager:
             logger.error(f"Unexpected error during session refresh: {e}")
             return False
     
-    async def _test_session(self) -> Tuple[bool, str]:
+    async def _test_session(self, max_retries: int = 3) -> Tuple[bool, str]:
         """Test if the current session is valid by making a test request.
         
+        Args:
+            max_retries: Maximum number of retry attempts
+            
         Returns:
             Tuple[bool, str]: (is_valid, message)
         """
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'application/json',
-                'X-CSRFToken': self._session_cookies.get('csrftoken', ''),
-                'X-Requested-With': 'XMLHttpRequest'
-            }
-            
-            cookies = {name: value for name, value in self._session_cookies.items()}
-            
-            response = requests.get(
-                'https://www.instagram.com/data/shared_data/',
-                headers=headers,
-                cookies=cookies,
-                timeout=10
-            )
-            
-            if response.status_code == 200 and 'config' in response.json():
-                return True, "Session is valid"
-            else:
-                return False, f"Invalid response: {response.status_code}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json',
+            'X-CSRFToken': self._session_cookies.get('csrftoken', ''),
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+        
+        cookies = {name: value for name, value in self._session_cookies.items()}
+        last_error = None
+        
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt > 0:
+                    logger.info(f"Retrying session test (attempt {attempt}/{max_retries})")
+                    
+                response = requests.get(
+                    'https://www.instagram.com/data/shared_data/',
+                    headers=headers,
+                    cookies=cookies,
+                    timeout=10 + (attempt * 5)  # Increase timeout with each retry
+                )
                 
-        except requests.RequestException as e:
-            return False, f"Request failed: {str(e)}"
-        except Exception as e:
-            return False, f"Test failed: {str(e)}"
+                if response.status_code == 200 and 'config' in response.json():
+                    return True, "Session is valid"
+                elif response.status_code == 429:
+                    msg = "Rate limited by Instagram. Please wait a few minutes."
+                    logger.warning(msg)
+                    return False, msg
+                else:
+                    last_error = f"Invalid response: {response.status_code}"
+                    
+            except requests.exceptions.Timeout:
+                last_error = "Request timed out. Instagram might be slow or network issues."
+                logger.warning(f"Session test attempt {attempt + 1} failed: {last_error}")
+            except requests.exceptions.ConnectionError:
+                last_error = "Network connection error. Please check your internet connection."
+                logger.warning(f"Session test attempt {attempt + 1} failed: {last_error}")
+            except Exception as e:
+                last_error = f"Test failed: {str(e)}"
+                logger.warning(f"Session test attempt {attempt + 1} failed: {last_error}")
+            
+            if attempt < max_retries:
+                import time
+                time.sleep(2 ** attempt)  # Exponential backoff: 1, 2, 4, 8 seconds
+                continue
+            
+            return False, f"Session test failed after {max_retries} attempts. Last error: {last_error}"
             
     def debug_cookies(self) -> None:
         """Debug helper to log all available Instagram cookies."""
