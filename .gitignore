@@ -84,3 +84,12 @@ src/services/__pycache__/database.cpython-313.pyc
 src/services/__pycache__/instagram_downloader.cpython-313.pyc
 src/services/__pycache__/telethon_uploader.cpython-313.pyc
 src/services/__pycache__/upload.cpython-313.pyc
+src/__pycache__/bot.cpython-313.pyc
+src/core/__pycache__/config.cpython-313.pyc
+src/core/__pycache__/load_config.cpython-313.pyc
+src/core/__pycache__/session_manager.cpython-313.pyc
+src/services/__pycache__/bot_api_uploader.cpython-313.pyc
+src/services/__pycache__/database.cpython-313.pyc
+src/services/__pycache__/instagram_downloader.cpython-313.pyc
+src/services/__pycache__/telethon_uploader.cpython-313.pyc
+src/services/__pycache__/upload.cpython-313.pyc
