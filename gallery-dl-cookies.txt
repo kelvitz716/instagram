@@ -1,0 +1,14 @@
+{
+    "instagram": {
+        "datr": "jBGaaDzmzkPAPVn04IyvaPxW",
+        "ps_l": "1",
+        "ps_n": "1",
+        "mid": "aJoRjAAEAAHCUYitYQEveBZPcNSe",
+        "ig_did": "4CCC1E52-569E-4721-B138-E252D6E6A0F4",
+        "ig_direct_region_hint": "\"NHA\\05469710464283\\0541787287170:01feefa18d50c62e4da1d400bfb7503c0c94bfb247642846e2c6bc87b4bc343defc7011f\"",
+        "sessionid": "69710464283%3A0DbUJCDPl3Fdp5%3A26%3AAYeVcNgy5w0Rxn0SiOK38rvG_kflfMl0o7yaXMCBRw",
+        "wd": "1865x933",
+        "ds_user_id": "69710464283",
+        "rur": "\"CLN\\05469710464283\\0541787400482:01fed0bd04f416174ee67213eb97f91dcfa6bab7a47d110bfe23e74e80926bf5efaca777\""
+    }
+}
