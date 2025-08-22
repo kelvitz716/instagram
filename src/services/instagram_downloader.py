@@ -46,8 +46,9 @@ class InstagramDownloader:
             logger.error(f"Failed to initialize sessions: {e}")
             raise
             
-        # Path to gallery-dl executable
+        # Path to executables
         self.gallery_dl_path = Path("/home/kelvitz/Github/instagram/myenv/bin/gallery-dl")
+        self.yt_dlp_path = Path("/home/kelvitz/Github/instagram/myenv/bin/yt-dlp")
         
     async def _check_session_before_download(self) -> bool:
         """Check if we have a valid session before attempting download.
@@ -81,6 +82,105 @@ class InstagramDownloader:
             logger.error(f"Session check failed: {e}")
             return False
     
+    async def _download_with_yt_dlp(self, url: str, output_path: Path, is_story: bool = False) -> List[Path]:
+        """Download Instagram content using yt-dlp for better story/highlight support"""
+        try:
+            # Build command with proper options for stories/highlights
+            cmd = [
+                str(self.yt_dlp_path),
+                '--cookies-from-browser', 'firefox',
+                '--write-info-json',
+                '--no-warning',
+                '-o', str(output_path / '%(title)s-%(id)s.%(ext)s'),
+                url
+            ]
+            
+            logger.info(f"Running yt-dlp command: {' '.join(cmd)}")
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            if result.stdout:
+                logger.info(f"yt-dlp stdout: {result.stdout}")
+            if result.stderr:
+                logger.error(f"yt-dlp stderr: {result.stderr}")
+                
+            if result.returncode != 0:
+                error_msg = result.stderr.lower()
+                if any(phrase in error_msg for phrase in [
+                    "login required",
+                    "authentication",
+                    "403 forbidden",
+                    "401 unauthorized"
+                ]):
+                    raise InstagramSessionError(
+                        "Instagram authentication failed. Please login to Instagram in Firefox and try again."
+                    )
+                else:
+                    raise InstagramDownloadError(f"yt-dlp failed with code {result.returncode}: {result.stderr}")
+            
+            # Find downloaded files
+            files = self._find_downloaded_files(output_path)
+            if not files:
+                if is_story:
+                    # For stories, no files might mean the story expired
+                    raise InstagramDownloadError("Story not found or expired")
+                else:
+                    raise InstagramDownloadError("No files were downloaded")
+                    
+            return files
+            
+        except subprocess.TimeoutExpired:
+            raise InstagramDownloadError("Download timed out")
+        except Exception as e:
+            raise InstagramDownloadError(f"Download failed: {str(e)}")
+            
+    @RetryableOperation(max_retries=3, backoff_factor=20.0)
+    async def download_story(self, username: str) -> List[Path]:
+        """Download a user's active stories"""
+        try:
+            session_valid = await self._check_session_before_download()
+            if not session_valid:
+                raise InstagramSessionError(
+                    "No valid Instagram session found. Please login to Instagram in Firefox and try again."
+                )
+                
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            output_path = self.downloads_path / f"stories_{timestamp}"
+            output_path.mkdir(parents=True, exist_ok=True)
+            
+            # Use story URL format
+            url = f"https://www.instagram.com/stories/{username}/"
+            return await self._download_with_yt_dlp(url, output_path, is_story=True)
+            
+        except Exception as e:
+            raise InstagramDownloadError(f"Failed to download stories for {username}: {str(e)}")
+            
+    @RetryableOperation(max_retries=3, backoff_factor=20.0)
+    async def download_highlight(self, highlight_id: str) -> List[Path]:
+        """Download a highlight by its ID"""
+        try:
+            session_valid = await self._check_session_before_download()
+            if not session_valid:
+                raise InstagramSessionError(
+                    "No valid Instagram session found. Please login to Instagram in Firefox and try again."
+                )
+                
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            output_path = self.downloads_path / f"highlight_{timestamp}"
+            output_path.mkdir(parents=True, exist_ok=True)
+            
+            # Use highlight URL format
+            url = f"https://www.instagram.com/stories/highlights/{highlight_id}/"
+            return await self._download_with_yt_dlp(url, output_path, is_story=True)
+            
+        except Exception as e:
+            raise InstagramDownloadError(f"Failed to download highlight {highlight_id}: {str(e)}")
+            
     @RetryableOperation(max_retries=3, backoff_factor=20.0)
     async def download_post(self, url: str) -> List[Path]:
         """
@@ -209,15 +309,32 @@ class InstagramDownloader:
     async def _extract_metadata(self, path: Path) -> Dict[str, Any]:
         """Extract metadata from downloaded files"""
         try:
-            # Look for JSON metadata files
+            # Look for JSON metadata files, first in immediate directory
             json_files = list(path.parent.glob("*.json"))
             if not json_files:
-                # Try looking in the same directory as the media file
+                # Try parent directory if in a subfolder
+                json_files = list(path.parent.parent.glob("*.json"))
+            if not json_files:
+                # Try looking in the same directory with matching stem
                 json_files = list(path.with_suffix('.json').parent.glob(f"{path.stem}*.json"))
                 
             if json_files:
                 with open(json_files[0], 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    metadata = json.load(f)
+                    # Extract username and caption if available
+                    username = metadata.get('uploader', '').strip('@')
+                    caption = metadata.get('description', '')
+                    media_count = len(metadata.get('_files', [])) or 1
+                    
+                    return {
+                        'username': username,
+                        'caption': caption,
+                        'media_count': media_count,
+                        'url': metadata.get('webpage_url', ''),
+                        'timestamp': metadata.get('date', ''),
+                        'likes': metadata.get('like_count', 0),
+                        'comments': metadata.get('comment_count', 0)
+                    }
             else:
                 logger.warning(f"No metadata file found for {path}")
                 return {}
@@ -248,6 +365,54 @@ class InstagramDownloader:
                     return username
         return None
     
+    async def detect_content_type(self, url: str) -> Tuple[str, Optional[str]]:
+        """
+        Detect the type of Instagram content from the URL
+        
+        Returns:
+            Tuple[str, Optional[str]]: (content_type, identifier)
+            content_type can be: 'post', 'reel', 'story', 'highlight', 'unknown'
+            identifier can be username for stories or highlight_id for highlights
+        """
+        url = url.split("?")[0].rstrip("/")  # Clean up URL
+        
+        patterns = {
+            # Match stories URL with username
+            "story": r"instagram\.com/stories/([A-Za-z0-9_.]+)/?$",
+            # Match highlights URL with highlight ID
+            "highlight": r"instagram\.com/stories/highlights/(\d+)",
+            # Match reel URLs
+            "reel": r"instagram\.com/reel/[A-Za-z0-9_-]+/?$",
+            # Match post URLs
+            "post": r"instagram\.com/p/[A-Za-z0-9_-]+/?$",
+        }
+        
+        for content_type, pattern in patterns.items():
+            if match := re.search(pattern, url):
+                if content_type in ["story", "highlight"]:
+                    return content_type, match.group(1)
+                return content_type, None
+                
+        return "unknown", None
+        
+    async def download_content(self, url: str) -> List[Path]:
+        """
+        Unified method to download any type of Instagram content.
+        Automatically detects content type and uses appropriate download method.
+        """
+        content_type, identifier = await self.detect_content_type(url)
+        
+        if content_type == "story" and identifier:
+            return await self.download_story(identifier)
+        elif content_type == "highlight" and identifier:
+            return await self.download_highlight(identifier)
+        elif content_type in ["post", "reel", "unknown"]:
+            # Use post downloader for both posts and reels, and unknown URLs
+            # as they might be private URLs that don't match standard patterns
+            return await self.download_post(url)
+        else:
+            raise InstagramDownloadError(f"Unsupported content type for URL: {url}")
+            
     async def test_session(self) -> Tuple[bool, str]:
         """
         Test if the current session is working by attempting to fetch Instagram homepage.

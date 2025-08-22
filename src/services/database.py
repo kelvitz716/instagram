@@ -1,6 +1,8 @@
-import aiosqlite
+import sqlite3
 import logging
 import asyncio
+import queue
+import threading
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 from datetime import datetime
@@ -10,48 +12,75 @@ from ..core.config import DatabaseConfig
 
 logger = logging.getLogger(__name__)
 
-class ConnectionPool:
-    """A simple async connection pool for SQLite."""
+class SyncConnectionPool:
+    """A thread-safe synchronous connection pool for SQLite."""
     
     def __init__(self, database: str, max_connections: int = 5):
         self.database = database
         self.max_connections = max_connections
-        self._pool: List[aiosqlite.Connection] = []
-        self._lock = asyncio.Lock()
-        self._semaphore = asyncio.Semaphore(max_connections)
-    
-    async def initialize(self):
+        self._pool = queue.Queue(maxsize=max_connections)
+        self._lock = threading.Lock()
+        
+    def initialize(self):
         """Initialize the connection pool."""
-        async with self._lock:
+        with self._lock:
             for _ in range(self.max_connections):
-                conn = await aiosqlite.connect(self.database)
-                await conn.execute("PRAGMA journal_mode=WAL")  # Enable Write-Ahead Logging
-                await conn.execute("PRAGMA synchronous=NORMAL")  # Optimize synchronization
-                await conn.execute("PRAGMA cache_size=-2000")  # Set cache to 2MB
-                self._pool.append(conn)
-    
-    async def acquire(self) -> aiosqlite.Connection:
+                conn = sqlite3.connect(
+                    self.database,
+                    isolation_level=None,  # Enable autocommit mode
+                    check_same_thread=False  # Allow threads to share connections
+                )
+                # Enable WAL mode and optimize settings
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA cache_size=-2000")
+                self._pool.put(conn)
+                
+    def acquire(self) -> sqlite3.Connection:
         """Acquire a connection from the pool."""
-        await self._semaphore.acquire()
-        async with self._lock:
-            if not self._pool:
-                conn = await aiosqlite.connect(self.database)
-            else:
-                conn = self._pool.pop()
-        return conn
+        try:
+            conn = self._pool.get(timeout=1)
+            # Verify connection is still good
+            try:
+                conn.execute("SELECT 1")
+            except (sqlite3.Error, sqlite3.OperationalError):
+                # Connection is stale, create a new one
+                conn.close()
+                conn = sqlite3.connect(
+                    self.database,
+                    isolation_level=None,
+                    check_same_thread=False
+                )
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA cache_size=-2000")
+            return conn
+        except queue.Empty:
+            # Create a new connection if pool is empty
+            conn = sqlite3.connect(
+                self.database,
+                isolation_level=None,
+                check_same_thread=False
+            )
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=-2000")
+            return conn
     
-    async def release(self, conn: aiosqlite.Connection):
+    def release(self, conn: sqlite3.Connection):
         """Release a connection back to the pool."""
-        async with self._lock:
-            self._pool.append(conn)
-        self._semaphore.release()
+        try:
+            self._pool.put_nowait(conn)
+        except queue.Full:
+            # If pool is full, close the connection
+            conn.close()
     
-    async def close(self):
+    def close(self):
         """Close all connections in the pool."""
-        async with self._lock:
-            while self._pool:
-                conn = self._pool.pop()
-                await conn.close()
+        with self._lock:
+            while not self._pool.empty():
+                conn = self._pool.get_nowait()
+                conn.close()
 
 class DatabaseService:
     """Handles all database operations with optimized performance."""
@@ -64,7 +93,7 @@ class DatabaseService:
         self._stats_cache: Dict[str, Tuple[Any, float]] = {}
         self._cache_ttl = 60  # Cache TTL in seconds
         
-    async def _prepare_statements(self, conn: aiosqlite.Connection):
+    async def _prepare_statements(self, conn: sqlite3.Connection):
         """Prepare common SQL statements."""
         statements = {
             'insert_download': """
@@ -98,17 +127,13 @@ class DatabaseService:
     async def initialize(self):
         """Initialize the database with optimized settings."""
         # Create connection pool
-        self._pool = ConnectionPool(self.db_path, self.config.pool_size)
-        await self._pool.initialize()
+        self._pool = SyncConnectionPool(self.db_path, self.config.pool_size)
+        self._pool.initialize()
         
-        async with await self._pool.acquire() as conn:
-            # Enable WAL mode and optimize settings
-            await conn.execute("PRAGMA journal_mode=WAL")
-            await conn.execute("PRAGMA synchronous=NORMAL")
-            await conn.execute("PRAGMA cache_size=-2000")
-            
+        conn = self._pool.acquire()
+        try:
             # Create tables with optimized indexes
-            await conn.execute("""
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS downloads (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     url TEXT NOT NULL,
@@ -120,10 +145,10 @@ class DatabaseService:
                 )
             """)
             
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_url ON downloads(url)")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_url ON downloads(url)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status)")
             
-            await conn.execute("""
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS uploads (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     download_id INTEGER,
@@ -137,10 +162,10 @@ class DatabaseService:
                 )
             """)
             
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_uploads_status ON uploads(status)")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_uploads_download_id ON uploads(download_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_uploads_status ON uploads(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_uploads_download_id ON uploads(download_id)")
             
-            await conn.execute("""
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS file_operations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     file_path TEXT NOT NULL,
@@ -152,23 +177,28 @@ class DatabaseService:
                 )
             """)
             
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_operations_type ON file_operations(operation_type)")
-            await conn.commit()
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_operations_type ON file_operations(operation_type)")
             
             # Prepare statements
             await self._prepare_statements(conn)
+        finally:
+            self._pool.release(conn)
     
     @lru_cache(maxsize=1000)
     async def get_download_status(self, url: str) -> Optional[Dict[str, Any]]:
         """Get the status of a download by URL with caching."""
-        async with await self._pool.acquire() as conn:
-            conn.row_factory = aiosqlite.Row
-            async with conn.execute(
+        conn = self._pool.acquire()
+        try:
+            cursor = conn.execute(
                 "SELECT * FROM downloads WHERE url = ? ORDER BY created_at DESC LIMIT 1",
                 (url,)
-            ) as cursor:
-                row = await cursor.fetchone()
-                return dict(row) if row else None
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(zip([col[0] for col in cursor.description], row))
+            return None
+        finally:
+            self._pool.release(conn)
 
     async def get_statistics(self) -> Dict[str, Any]:
         """Get bot statistics from database with caching."""
@@ -180,27 +210,43 @@ class DatabaseService:
             if current_time - timestamp < self._cache_ttl:
                 return stats
         
-        async with await self._pool.acquire() as conn:
-            conn.row_factory = aiosqlite.Row
+        conn = self._pool.acquire()
+        try:
             stats = defaultdict(int)
             
-            # Use a single query for better performance
-            async with conn.execute("""
+            # First check if tables exist and have the required columns
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM sqlite_master 
+                WHERE type='table' AND name IN ('downloads', 'uploads', 'file_operations')
+            """)
+            table_count = cursor.fetchone()[0]
+            if table_count < 3:
+                # Tables don't exist yet
+                return dict(stats)
+                
+            # Use a single query for better performance, with proper status checks
+            cursor = conn.execute("""
                 SELECT 
                     (SELECT COUNT(*) FROM downloads) as total_downloads,
                     (SELECT COUNT(*) FROM downloads WHERE status = 'success') as successful_downloads,
                     (SELECT COUNT(*) FROM downloads WHERE status = 'failed') as failed_downloads,
                     (SELECT COUNT(*) FROM uploads) as total_uploads,
                     (SELECT COUNT(*) FROM uploads WHERE status = 'success') as successful_uploads,
-                    (SELECT COUNT(*) FROM uploads WHERE status = 'failed') as failed_uploads
-            """) as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    stats.update(dict(row))
+                    (SELECT COUNT(*) FROM uploads WHERE status = 'failed') as failed_uploads,
+                    (SELECT COUNT(DISTINCT file_path) FROM file_operations WHERE operation_type = 'download') as total_files_downloaded,
+                    (SELECT COUNT(DISTINCT file_path) FROM file_operations WHERE operation_type = 'upload' AND success = 1) as successful_file_uploads,
+                    (SELECT SUM(file_size) FROM file_operations WHERE operation_type = 'download') as total_bytes_downloaded
+            """)
+            row = cursor.fetchone()
+            if row:
+                col_names = [col[0] for col in cursor.description]
+                stats.update(dict(zip(col_names, row)))
             
             # Cache the results
             self._stats_cache['stats'] = (dict(stats), current_time)
             return dict(stats)
+        finally:
+            self._pool.release(conn)
 
     async def record_download(
         self, 
@@ -210,26 +256,45 @@ class DatabaseService:
         error: Optional[str] = None
     ) -> int:
         """Record a new download attempt with prepared statement."""
-        async with await self._pool.acquire() as conn:
-            cursor = await conn.execute(
+        conn = self._pool.acquire()
+        try:
+            cursor = conn.execute(
                 self._prepared_statements['insert_download'],
                 (url, status, ','.join(file_paths) if file_paths else None, error)
             )
-            await conn.commit()
+            
+            # Clear stats cache to ensure fresh data
+            self._stats_cache.clear()
+            
             return cursor.lastrowid
+        finally:
+            self._pool.release(conn)
 
     async def batch_log_operations(self, operations: List[Tuple[str, int, str, bool, Optional[str]]]):
         """Batch log multiple file operations for better performance."""
-        async with await self._pool.acquire() as conn:
-            await conn.executemany(
+        conn = self._pool.acquire()
+        try:
+            conn.executemany(
                 self._prepared_statements['insert_operation'],
                 operations
             )
-            await conn.commit()
+        finally:
+            self._pool.release(conn)
+
+    async def log_file_operation(
+        self, 
+        file_path: str, 
+        file_size: int, 
+        operation_type: str,
+        success: bool,
+        error: Optional[str] = None
+    ) -> None:
+        """Log a file operation with optimized single-query insert."""
+        await self.batch_log_operations([(file_path, file_size, operation_type, success, error)])
 
     async def close(self):
         """Close the connection pool."""
         if self._pool:
-            await self._pool.close()
+            self._pool.close()
             self._pool = None
             self._stats_cache.clear()
