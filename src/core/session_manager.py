@@ -1,155 +1,188 @@
-"""Instagram session manager module."""
+"""Session manager for Instagram cookie management."""
 import logging
 import os
-import json
 from pathlib import Path
+from typing import Dict, Optional, Tuple
 import browser_cookie3
-from gallery_dl import config, job, util
+import requests
+from datetime import datetime, timedelta
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging
 logger = logging.getLogger(__name__)
 
 class InstagramSessionError(Exception):
-    """Custom exception for Instagram session errors."""
-    pass
+    """Exception raised for Instagram session errors."""
+    def __init__(self, message: str, is_rate_limit: bool = False):
+        super().__init__(message)
+        self.is_rate_limit = is_rate_limit
 
 class InstagramSessionManager:
-    """Manages Instagram sessions using gallery-dl."""
+    """Manages Instagram sessions using Firefox cookies."""
     
-    def __init__(self, download_path: Path, username: str):
+    REQUIRED_COOKIES = ['sessionid', 'csrftoken']
+    COOKIE_DOMAIN = '.instagram.com'
+    MANUAL_CHECK_THRESHOLD = timedelta(minutes=10)  # If cookies refreshed within this time, might be rate limiting
+    SESSION_REFRESH_URL = 'https://www.instagram.com/accounts/login/ajax/'
+    
+    def __init__(self, downloads_path: Path, username: Optional[str] = None):
         """Initialize the session manager.
         
         Args:
-            download_path (Path): Path where downloads and session files are stored
-            username (str): Instagram username for authentication
+            downloads_path: Path where downloads and cookies will be stored
+            username: Instagram username (optional)
         """
-        self.download_path = download_path
+        self.downloads_path = downloads_path
         self.username = username
-        self.config_file = Path("gallery-dl.conf")
-        
-        # Create downloads directory
-        self.download_path.mkdir(parents=True, exist_ok=True)
-        
-        # Configure gallery-dl
-        self._configure_gallery_dl()
+        self._session_cookies: Dict[str, str] = {}
+        self._last_cookie_refresh = None  # Timestamp of last successful cookie refresh
+        self._load_cookies()
     
-    def _configure_gallery_dl(self):
-        """Configure gallery-dl with proper settings."""
-        config_data = {
-            "extractor": {
-                "instagram": {
-                    "directory": str(self.download_path),
-                    "filename": "{date:%Y-%m-%d_%H-%M-%S}_Instagram_{shortcode}_{num}.{extension}",
-                    "metadata": True,
-                    "videos": True,
-                    "cookies-from-browser": "firefox",
-                    "browser": "firefox",
-                    "cookies-update": True,  # Changed to True to update cookies
-                    "postprocessors": [
-                        {
-                            "name": "metadata",
-                            "mode": "json",
-                            "whitelist": ["date", "shortcode", "description", "tags"]
-                        }
-                    ]
-                }
-            },
-            "output": {
-                "mode": "terminal",
-                "progress": True,
-                "shorten": True,
-                "log": str(self.download_path / "gallery-dl.log")
-            },
-            "cache": {
-                "file": str(self.download_path / ".gallery-dl.cache")
-            }
-        }
-        
-        # Save configuration
-        with open(self.config_file, 'w') as f:
-            json.dump(config_data, f, indent=4)
-            
-        # Load configuration
-        config.load([str(self.config_file)])
-    
-    def _init_browser_session(self) -> bool:
-        """Initialize browser cookie session by checking Firefox cookies directly.
-        
-        Returns:
-            bool: True if valid session found
-        """
+    def _load_cookies(self) -> None:
+        """Load cookies from Firefox and validate them."""
         try:
-            # Check if Firefox has Instagram cookies
-            cookies = browser_cookie3.firefox(domain_name="instagram.com")
-            session_found = False
-            csrf_found = False
+            logger.info("Loading Instagram cookies from Firefox...")
+            cookies = browser_cookie3.firefox()
             
+            # Clear existing cookies
+            old_cookies = self._session_cookies.copy()
+            self._session_cookies.clear()
+            
+            # Load new cookies
             for cookie in cookies:
-                if cookie.name == "sessionid" and cookie.value:
-                    session_found = True
-                    logger.info(f"Found sessionid cookie: {cookie.value[:10]}...")
-                if cookie.name == "csrftoken" and cookie.value:
-                    csrf_found = True
-                    logger.info(f"Found csrftoken cookie: {cookie.value[:10]}...")
+                if cookie.domain == self.COOKIE_DOMAIN:
+                    masked_value = f"{str(cookie.value)[:10]}..."
+                    logger.debug(f"Found cookie: {cookie.name} = {masked_value}")
+                    self._session_cookies[cookie.name] = cookie.value
+
+            # Check if cookies actually changed
+            if self._session_cookies != old_cookies:
+                self._last_cookie_refresh = datetime.now()
+                logger.info("Cookies were refreshed")
             
-            if session_found and csrf_found:
-                logger.info("Successfully found Instagram session cookies in Firefox")
-                return True
-            else:
-                missing = []
-                if not session_found:
-                    missing.append("sessionid")
-                if not csrf_found:
-                    missing.append("csrftoken")
-                logger.error(f"Missing required cookies: {', '.join(missing)}")
-                return False
-                
+            # Verify and log found cookies
+            self._validate_cookies()
+            
+            logger.info("Successfully loaded Instagram cookies from Firefox")
+
         except Exception as e:
-            logger.error(f"Failed to load Firefox cookies: {e}")
-            return False
+            logger.error(f"Failed to load Firefox cookies: {str(e)}")
+            raise InstagramSessionError("Failed to load Instagram cookies from Firefox") from e
     
-    def check_session(self) -> bool:
-        """Check if the session is valid.
-        
-        Returns:
-            bool: True if valid session found
-        """
-        return self._init_browser_session()
-    
-    def create_job(self, url: str) -> job.Job:
-        """Create a gallery-dl job for downloading.
-        
-        Args:
-            url (str): The URL to download from
-            
-        Returns:
-            job.Job: Configured gallery-dl job instance
+    def _validate_cookies(self) -> None:
+        """Validate required cookies and log their presence.
         
         Raises:
-            InstagramSessionError: If no valid session found
+            InstagramSessionError: If required cookies are missing
         """
-        if not self._init_browser_session():
+        for cookie_name in self.REQUIRED_COOKIES:
+            if cookie_name in self._session_cookies:
+                masked_value = f"{str(self._session_cookies[cookie_name])[:10]}..."
+                logger.debug(f"Found {cookie_name} cookie: {masked_value}")
+            
+        missing_cookies = [name for name in self.REQUIRED_COOKIES 
+                         if name not in self._session_cookies]
+                         
+        if missing_cookies:
+            error_msg = f"Missing required cookies: {', '.join(missing_cookies)}"
+            logger.error(error_msg)
+            
+            # Check if cookies were recently refreshed
+            if (self._last_cookie_refresh and 
+                datetime.now() - self._last_cookie_refresh < self.MANUAL_CHECK_THRESHOLD):
+                error_msg = (
+                    f"Cookies were refreshed {(datetime.now() - self._last_cookie_refresh).total_seconds():.0f} "
+                    "seconds ago but still invalid. Please check if Instagram is "
+                    "accessible in Firefox and refresh the page to update cookies."
+                )
+                raise InstagramSessionError(error_msg, is_rate_limit=True)
+            
             raise InstagramSessionError(
-                "No valid Instagram session found. Please login to Instagram in Firefox and try again."
+                "Session expired. Will try to refresh cookies from Firefox."
+            )
+    
+    async def refresh_session(self) -> bool:
+        """Refresh session by reloading cookies from Firefox.
+        
+        Returns:
+            bool: True if refresh was successful, False otherwise
+        """
+        try:
+            # Reload cookies from Firefox
+            self._load_cookies()
+            
+            # Validate current cookies
+            self._validate_cookies()
+            
+            # Test session validity
+            valid, msg = await self._test_session()
+            if not valid:
+                logger.warning(f"Session test failed after refresh: {msg}")
+                return False
+                
+            return True
+            
+        except InstagramSessionError as e:
+            if e.is_rate_limit:
+                raise  # Re-raise rate limit errors
+            logger.error(f"Session refresh failed: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error during session refresh: {e}")
+            return False
+    
+    async def _test_session(self) -> Tuple[bool, str]:
+        """Test if the current session is valid by making a test request.
+        
+        Returns:
+            Tuple[bool, str]: (is_valid, message)
+        """
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'application/json',
+                'X-CSRFToken': self._session_cookies.get('csrftoken', ''),
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+            
+            cookies = {name: value for name, value in self._session_cookies.items()}
+            
+            response = requests.get(
+                'https://www.instagram.com/data/shared_data/',
+                headers=headers,
+                cookies=cookies,
+                timeout=10
             )
             
-        try:
-            # Create gallery-dl job with updated config
-            return job.Job(url)
-        except Exception as e:
-            raise InstagramSessionError(f"Failed to create download job: {e}")
-    
-    def debug_cookies(self):
-        """Debug method to check what cookies are available."""
-        try:
-            cookies = browser_cookie3.firefox(domain_name="instagram.com")
-            logger.info("Available Instagram cookies in Firefox:")
-            for cookie in cookies:
-                logger.info(f"Cookie: {cookie.name} = {cookie.value[:10]}... (domain: {cookie.domain})")
-            
-            if not any(cookie.name == "sessionid" for cookie in cookies):
-                logger.warning("No sessionid cookie found - user may not be logged in")
+            if response.status_code == 200 and 'config' in response.json():
+                return True, "Session is valid"
+            else:
+                return False, f"Invalid response: {response.status_code}"
                 
+        except requests.RequestException as e:
+            return False, f"Request failed: {str(e)}"
         except Exception as e:
-            logger.error(f"Failed to debug cookies: {e}")
+            return False, f"Test failed: {str(e)}"
+            
+    def debug_cookies(self) -> None:
+        """Debug helper to log all available Instagram cookies."""
+        logger.info("Available Instagram cookies in Firefox:")
+        for cookie in browser_cookie3.firefox():
+            if cookie.domain == self.COOKIE_DOMAIN:
+                masked_value = f"{str(cookie.value)[:10]}..."
+                logger.info(f"Cookie: {cookie.name} = {masked_value} (domain: {cookie.domain})")
+    
+    def check_session(self) -> bool:
+        """Check if we have all required cookies."""
+        try:
+            self._validate_cookies()
+            return True
+        except InstagramSessionError:
+            return False
+    
+    def debug_cookies(self) -> None:
+        """Debug helper to log all available Instagram cookies."""
+        logger.info("Available Instagram cookies in Firefox:")
+        for cookie in browser_cookie3.firefox():
+            if cookie.domain == self.COOKIE_DOMAIN:
+                masked_value = f"{str(cookie.value)[:10]}..."
+                logger.info(f"Cookie: {cookie.name} = {masked_value} (domain: {cookie.domain})")

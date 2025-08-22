@@ -12,7 +12,12 @@ A Telegram bot that downloads content from Instagram posts, reels, and carousels
 - Browser cookie authentication (Firefox)
 - Automatic file type detection
 - Configurable upload methods (Bot API or Telethon)
-- Retry mechanism with exponential backoff
+- Smart retry mechanism with exponential backoff
+- Progress tracking for downloads and uploads
+- Comprehensive error handling
+- Rate limiting and flood control
+- Configurable file watching
+- Enhanced session management
 
 Note: Stories and highlights are not supported as they require Instagram's private API access.
 
@@ -43,13 +48,27 @@ myenv\Scripts\activate  # Windows
 pip install -r requirements.txt
 ```
 
-4. Set up environment variables in `.env`:
+4. Copy and configure environment variables:
+```bash
+cp example.env .env
+# Edit .env with your settings
+```
+
+Required settings:
 ```env
 BOT_TOKEN=your_telegram_bot_token
 API_ID=your_telegram_api_id
 API_HASH=your_telegram_api_hash
 TARGET_CHAT_ID=your_target_chat_id
+```
+
+Optional settings (see example.env for all options):
+```env
 INSTAGRAM_USERNAME=your_instagram_username
+FIREFOX_COOKIES_PATH=custom/path/to/cookies.sqlite
+MAX_CONCURRENT_UPLOADS=3
+BATCH_SIZE=10
+FILE_WATCHER_ENABLED=true
 ```
 
 5. Log in to Instagram in Firefox:
@@ -62,31 +81,80 @@ INSTAGRAM_USERNAME=your_instagram_username
 
 1. Start the bot:
 ```bash
-python run_bot.py
+python bot.py
 ```
 
 2. In Telegram, send commands to the bot:
 - `/instagram <url>` - Download Instagram post, carousel, or reel
-- `/stats` - Show bot statistics
+- `/login [username]` - Log in with Firefox cookies
+- `/stats` - Show detailed statistics
+- `/debug_firefox` - Debug Firefox cookie detection
 
 Note: Simply paste the URL of any Instagram post, carousel, or reel to download it.
 
-## Important Notes
+## Enhanced Features
 
-Stories and highlights are not supported by this bot as they require Instagram's private API access. The bot uses Firefox cookies for authentication, which only provides access to content that's available through the web interface.
+### Smart Upload Selection
+- Automatically chooses between Bot API and Telethon based on file size
+- Fallback mechanism for failed uploads
+- Configurable size thresholds
+
+### Progress Tracking
+- Download progress with percentage and file size
+- Upload progress for large files
+- Batch processing status updates
+- Rate-limited status messages
+
+### Error Handling
+- Exponential backoff for retries
+- Network error recovery
+- Flood control protection
+- Session management and renewal
+
+### File Management
+- Automatic file type detection
+- Support for various media formats
+- Temporary file cleanup
+- Organized directory structure
+
+### Performance
+- Concurrent upload handling
+- Rate limiting protection
+- Memory usage optimization
+- Connection pooling
 
 ## Architecture
 
-- Service-based architecture for maintainability
-- Retry mechanism for handling transient failures
-- Progress tracking for long-running operations
-- SQLite database for persistent storage
-- Support for both Bot API and Telethon uploaders
-- Firefox cookie-based authentication for Instagram
+The bot follows a service-based architecture:
+
+```
+instagram-bot/
+├── src/
+│   ├── bot.py              # Main bot implementation
+│   ├── core/               # Core functionality
+│   │   ├── config.py       # Configuration classes
+│   │   ├── load_config.py  # Environment loading
+│   │   └── ...
+│   ├── services/          # Service modules
+│   │   ├── database.py    # Database operations
+│   │   ├── upload.py      # File upload handling
+│   │   └── ...
+│   └── utils/            # Utility functions
+├── tests/               # Test files
+├── bot.py              # Entry point
+└── requirements.txt    # Dependencies
+```
 
 ## Configuration
 
-The bot can be configured through environment variables or a `.env` file. See the sample `.env` file for available options.
+See `example.env` for all available configuration options, including:
+- Telegram settings
+- Instagram options
+- Upload configurations
+- Database settings
+- File watcher options
+- Logging preferences
+- Performance tuning
 
 ## License
 

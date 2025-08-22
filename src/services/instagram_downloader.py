@@ -1,11 +1,12 @@
+"""Instagram downloader service."""
 import asyncio
 import logging
 import re
 import json
-import subprocess
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
+import subprocess
 from ..core.config import InstagramConfig
 from ..core.retry import RetryableOperation
 from ..core.session_manager import InstagramSessionManager, InstagramSessionError
@@ -48,13 +49,35 @@ class InstagramDownloader:
         # Path to gallery-dl executable
         self.gallery_dl_path = Path("/home/kelvitz/Github/instagram/myenv/bin/gallery-dl")
         
-    def _check_session_before_download(self) -> bool:
-        """Check if we have a valid session before attempting download."""
+    async def _check_session_before_download(self) -> bool:
+        """Check if we have a valid session before attempting download.
+        
+        Returns:
+            bool: True if session is valid, False otherwise
+            
+        Raises:
+            InstagramSessionError: If session is invalid and rate limiting is suspected
+        """
         try:
-            # Use the session manager's debug method to check cookies
-            self.session_manager.debug_cookies()
-            return self.session_manager.check_session()
-        except Exception as e:
+            # Validate current cookies
+            self.session_manager._validate_cookies()
+            
+            # Test session with a download attempt first
+            # If it fails, try refreshing the session once
+            valid, msg = await self.session_manager._test_session()
+            if not valid:
+                logger.warning(f"Initial session test failed: {msg}")
+                logger.info("Attempting to refresh session...")
+                
+                if not await self.session_manager.refresh_session():
+                    return False
+            
+            return True
+            
+        except InstagramSessionError as e:
+            if e.is_rate_limit:
+                # Re-raise rate limit errors to signal manual intervention needed
+                raise
             logger.error(f"Session check failed: {e}")
             return False
     
@@ -73,8 +96,9 @@ class InstagramDownloader:
             InstagramDownloadError: If download fails
         """
         try:
-            # Check session before attempting download
-            if not self._check_session_before_download():
+            # Check and validate session before attempting download
+            session_valid = await self._check_session_before_download()
+            if not session_valid:
                 raise InstagramSessionError(
                     "No valid Instagram session found. Please login to Instagram in Firefox and try again."
                 )
@@ -132,19 +156,23 @@ class InstagramDownloader:
                     raise InstagramDownloadError(f"Content not found: {url}")
                 else:
                     raise InstagramDownloadError(f"gallery-dl failed with code {result.returncode}: {result.stderr}")
-                
-            # Find downloaded files
-            files = self._find_downloaded_files(output_path)
+                    
+            # Parse the output to find downloaded files
+            files = []
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                file_path = Path(line)
+                if file_path.exists() and file_path.is_file():
+                    files.append(file_path)
             
             if not files:
-                # Check if gallery-dl actually ran but didn't download anything
-                if "already exists" in result.stdout.lower():
-                    logger.warning("Files may have been previously downloaded")
-                    # Try to find files in the download directory
-                    files = self._find_downloaded_files(self.downloads_path)
-                
-                if not files:
-                    raise InstagramDownloadError(f"No files were downloaded from {url}")
+                logger.error("No files downloaded")
+                if result.stderr:
+                    logger.error(f"gallery-dl stderr: {result.stderr}")
+                raise InstagramDownloadError(f"No files were downloaded from {url}")
                 
             logger.info(f"Successfully downloaded {len(files)} file(s) from {url}")
             return files
@@ -165,7 +193,7 @@ class InstagramDownloader:
             return []
             
         # Look for common media file extensions
-        media_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.avi', '.webm'}
+        media_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.avi', '.webm', '.webp'}
         files = []
         
         for file_path in search_path.rglob("*"):

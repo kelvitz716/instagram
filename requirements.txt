@@ -2,6 +2,8 @@
 python-dotenv>=0.19.0
 structlog>=21.1.0
 rich>=10.9.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
 
 # Telegram
 python-telegram-bot>=20.0
@@ -10,6 +12,7 @@ telethon>=1.24.0
 # Instagram downloader
 gallery-dl>=1.25.1
 browser-cookie3>=0.19.1
+instaloader>=4.10.0
 
 # Database
 aiosqlite>=0.17.0
@@ -19,6 +22,11 @@ httpx>=0.24.0
 
 # Progress tracking
 tqdm>=4.65.0
+asyncio-throttle>=1.0.2
+watchdog>=3.0.0
+
+# System
+python-magic>=0.4.27
 
 # Type hints
 typing_extensions>=4.4.0
