@@ -39,6 +39,9 @@ from telethon import TelegramClient
 # Local application imports
 from src.core.config import BotConfig
 from src.core.services import BotServices
+from src.core.resilience.retry import with_retry
+from src.core.resilience.circuit_breaker import with_circuit_breaker, ServiceUnavailableError
+from src.core.resilience.recovery import SessionRecovery, StateRecovery
 from src.services.database import DatabaseService
 from src.services.upload import FileUploadService
 from src.services.bot_api_uploader import BotAPIUploader
@@ -210,6 +213,10 @@ class EnhancedTelegramBot:
         self._setup_directories()
         self._cache: Dict[str, Any] = {}
         
+        # Initialize recovery services
+        self.session_recovery = SessionRecovery(self.services)
+        self.state_recovery = StateRecovery(self.services)
+        
     def _setup_directories(self) -> None:
         """
         Setup required directories for bot operation with error handling.
@@ -244,13 +251,14 @@ class EnhancedTelegramBot:
 
     async def initialize(self) -> None:
         """
-        Initialize bot services in a specific sequence.
+        Initialize bot services in a specific sequence with resilience features.
         
         Sequence:
         1. Database initialization
         2. Telegram client setup
         3. Upload services configuration
         4. Instagram service setup
+        5. Resume any pending downloads
         
         Raises:
             Exception: If any initialization step fails
@@ -264,6 +272,18 @@ class EnhancedTelegramBot:
             
             # Set up instagram service in BotServices
             self.services.instagram_service = self.instagram_downloader
+            
+            # Resume any interrupted downloads
+            try:
+                pending_downloads = await self.state_recovery.get_pending_downloads()
+                if pending_downloads:
+                    logger.info(
+                        f"Found {len(pending_downloads)} interrupted downloads to resume"
+                    )
+                    for state in pending_downloads:
+                        await self.state_recovery.resume_download(state)
+            except Exception as e:
+                logger.error("Failed to resume downloads", error=str(e))
             
             logger.info("Bot initialized successfully", version=BOT_VERSION)
             
@@ -556,9 +576,11 @@ class EnhancedTelegramBot:
             logger.error("Failed to edit message", error=str(e))
             return False
 
+    @with_circuit_breaker(failure_threshold=5, reset_timeout=300)
+    @with_retry(max_retries=3, exceptions=[ConnectionError, TimeoutError])
     async def _process_download(self, update: Update, url: str, content_type: str = None, 
                               identifier: str = None, secondary: str = None) -> None:
-        """Enhanced download processing with content type awareness."""
+        """Enhanced download processing with content type awareness and resilience."""
         status_message = None
         try:
             # Auto-detect if not provided
@@ -604,14 +626,27 @@ class EnhancedTelegramBot:
                 
             await self._safe_edit_message(status_message, msg_text)
             
-            # Download content using unified method
-            downloaded_files = await self.instagram_downloader.download_content(url)
+            try:
+                # Download content using unified method with session recovery
+                downloaded_files = await self.instagram_downloader.download_content(url)
+            except Exception as e:
+                # Try session recovery if download fails
+                logger.warning("Download failed, attempting session recovery", error=str(e))
+                if await self.session_recovery.recover_instagram_session():
+                    # Retry download after session recovery
+                    downloaded_files = await self.instagram_downloader.download_content(url)
+                else:
+                    raise
+                    
             if not downloaded_files:
                 error_msg = f"❌ Failed to download {content_name.lower()}"
                 if content_type in ['story', 'highlight']:
                     error_msg += "\n💡 Tip: Make sure you're logged into Instagram for stories/highlights"
                 await self._safe_edit_message(status_message, error_msg)
                 return
+                
+            # Save download state for recovery
+            await self.state_recovery.save_download_state(url, downloaded_files, status_message)
                 
             await self._safe_edit_message(
                 status_message,
@@ -699,6 +734,15 @@ class EnhancedTelegramBot:
         
         return caption
 
+    @with_circuit_breaker(failure_threshold=5, reset_timeout=300)
+    @with_retry(
+        max_retries=3,
+        exceptions=[ConnectionError, TimeoutError, telegram_error.RetryAfter],
+        initial_delay=1.0,
+        max_delay=60.0,
+        backoff_factor=2.0,
+        jitter=True
+    )
     async def _upload_files_with_progress(
         self, 
         files: List[Path], 
@@ -707,7 +751,7 @@ class EnhancedTelegramBot:
         content_type: str
     ) -> int:
         """
-        Upload files with progress tracking and content type awareness.
+        Upload files with progress tracking, content type awareness, and resilience.
         
         Args:
             files (List[Path]): List of files to upload
@@ -720,6 +764,7 @@ class EnhancedTelegramBot:
             
         Note:
             Files are uploaded in batches to optimize performance and handle rate limits
+            with automatic retries and circuit breaker protection
         """
         successful = 0
         batch_size = self.config.upload.batch_size
