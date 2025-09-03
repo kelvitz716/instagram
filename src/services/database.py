@@ -177,7 +177,24 @@ class DatabaseService:
                 )
             """)
             
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS download_state (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    url TEXT NOT NULL,
+                    files TEXT NOT NULL,  -- JSON array of file paths
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    status_message_id INTEGER,
+                    chat_id INTEGER,
+                    error TEXT,
+                    completed BOOLEAN DEFAULT 0,
+                    UNIQUE(url, status_message_id)
+                )
+            """)
+            
             conn.execute("CREATE INDEX IF NOT EXISTS idx_operations_type ON file_operations(operation_type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_download_state_status ON download_state(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_download_state_completed ON download_state(completed)")
             
             # Prepare statements
             await self._prepare_statements(conn)
@@ -291,6 +308,108 @@ class DatabaseService:
     ) -> None:
         """Log a file operation with optimized single-query insert."""
         await self.batch_log_operations([(file_path, file_size, operation_type, success, error)])
+
+    async def save_download_state(self, state: Dict[str, Any]) -> None:
+        """
+        Save download state for potential recovery.
+        
+        Args:
+            state: Dict containing:
+                - url: str - The download URL
+                - files: List[str] - List of downloaded file paths
+                - timestamp: str - ISO format timestamp
+                - status_message_id: Optional[int] - ID of the status message
+                - chat_id: Optional[int] - Chat ID where the download was initiated
+        """
+        files_str = ','.join(state['files'])  # Convert list to comma-separated string
+        
+        conn = self._pool.acquire()
+        try:
+            conn.execute("""
+                INSERT INTO download_state 
+                (url, files, timestamp, status_message_id, chat_id, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(url, status_message_id) 
+                DO UPDATE SET 
+                    files=excluded.files,
+                    timestamp=excluded.timestamp,
+                    status='pending'
+            """, (
+                state['url'],
+                files_str,
+                state['timestamp'],
+                state.get('status_message_id'),
+                state.get('chat_id'),
+                'pending'
+            ))
+        finally:
+            self._pool.release(conn)
+
+    async def get_pending_downloads(self) -> List[Dict[str, Any]]:
+        """
+        Get list of downloads that need recovery.
+        
+        Returns:
+            List of download states that were interrupted
+        """
+        conn = self._pool.acquire()
+        try:
+            cursor = conn.execute("""
+                SELECT * FROM download_state 
+                WHERE completed = 0 
+                AND status = 'pending'
+                AND timestamp > datetime('now', '-1 day')
+                ORDER BY timestamp DESC
+            """)
+            
+            results = []
+            for row in cursor.fetchall():
+                state = dict(zip([col[0] for col in cursor.description], row))
+                # Convert files string back to list
+                state['files'] = state['files'].split(',') if state['files'] else []
+                results.append(state)
+                
+            return results
+        finally:
+            self._pool.release(conn)
+
+    async def mark_download_completed(self, url: str, status_message_id: Optional[int] = None) -> None:
+        """Mark a download as completed."""
+        conn = self._pool.acquire()
+        try:
+            if status_message_id is not None:
+                conn.execute("""
+                    UPDATE download_state 
+                    SET completed = 1, status = 'completed'
+                    WHERE url = ? AND status_message_id = ?
+                """, (url, status_message_id))
+            else:
+                conn.execute("""
+                    UPDATE download_state 
+                    SET completed = 1, status = 'completed'
+                    WHERE url = ?
+                """, (url,))
+        finally:
+            self._pool.release(conn)
+
+    async def mark_download_failed(self, url: str, error: str, status_message_id: Optional[int] = None) -> None:
+        """Mark a download as failed with error information."""
+        conn = self._pool.acquire()
+        try:
+            if status_message_id is not None:
+                conn.execute("""
+                    UPDATE download_state 
+                    SET status = 'failed', error = ?, completed = 1
+                    WHERE url = ? AND status_message_id = ?
+                """, (error, url, status_message_id))
+            else:
+                conn.execute("""
+                    UPDATE download_state 
+                    SET status = 'failed', error = ?, completed = 1
+                    WHERE url = ?
+                """, (error, url))
+        finally:
+            self._pool.release(conn)
 
     async def close(self):
         """Close the connection pool."""
