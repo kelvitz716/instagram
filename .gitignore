@@ -1,0 +1,103 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+bin/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+venv/
+env/
+myenv/
+
+# Virtual Environment
+.env
+.venv
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Project specific
+downloads/
+uploads/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+gallery-dl.conf
+gallery-dl-cookies.txt
+.gallery-dl.cache
+cookies.txt
+
+# Telegram session files
+*.session
+*.session-journal
+telegram_bot_session.session
+telegram_bot_session.session-journal
+
+# Firefox profiles and cookies
+firefox_cookies.txt
+.firefox_cookies.sqlite
+
+# Documentation and analysis
+Telegram Bot Code Optimization & Improvement Analysis.pdf
+telegram_bot_improvements.md
+
+# Temporary files
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+src/__pycache__/*
+src/core/__pycache__/*
+src/services/__pycache__/*
+PROJECT_OVERVIEW.md
+src/__pycache__/bot.cpython-313.pyc
+src/core/__pycache__/config.cpython-313.pyc
+src/core/__pycache__/load_config.cpython-313.pyc
+src/core/__pycache__/session_manager.cpython-313.pyc
+src/services/__pycache__/database.cpython-313.pyc
+src/services/__pycache__/instagram_downloader.cpython-313.pyc
+src/services/__pycache__/upload.cpython-313.pyc
+src/__pycache__/bot.cpython-313.pyc
+src/core/__pycache__/config.cpython-313.pyc
+src/core/__pycache__/load_config.cpython-313.pyc
+src/core/__pycache__/session_manager.cpython-313.pyc
+src/services/__pycache__/bot_api_uploader.cpython-313.pyc
+src/services/__pycache__/database.cpython-313.pyc
+src/services/__pycache__/instagram_downloader.cpython-313.pyc
+src/services/__pycache__/telethon_uploader.cpython-313.pyc
+src/services/__pycache__/upload.cpython-313.pyc
+src/__pycache__/bot.cpython-313.pyc
+src/core/__pycache__/config.cpython-313.pyc
+src/core/__pycache__/load_config.cpython-313.pyc
+src/core/__pycache__/session_manager.cpython-313.pyc
+src/services/__pycache__/bot_api_uploader.cpython-313.pyc
+src/services/__pycache__/database.cpython-313.pyc
+src/services/__pycache__/instagram_downloader.cpython-313.pyc
+src/services/__pycache__/telethon_uploader.cpython-313.pyc
+src/services/__pycache__/upload.cpython-313.pyc
+bot_data.db-shm
+bot_data.db-wal
+src/__pycache__/bot.cpython-313.pyc
+src/core/__pycache__/session_manager.cpython-313.pyc
+src/services/__pycache__/bot_api_uploader.cpython-313.pyc
+src/__pycache__/bot.cpython-313.pyc
+bot_data.db-shm
+bot_data.db-wal

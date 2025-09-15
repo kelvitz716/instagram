@@ -1,0 +1,544 @@
+{
+  "keyword_responses": {
+    "hello": [
+      "Hello! How can I help you today?",
+      "Hi there! What's on your mind?",
+      "Hey! Great to see you!"
+    ],
+    "hi": [
+      "Hi there! What can I do for you?",
+      "Hello! How are you doing today?",
+      "Hi! I'm here to help."
+    ],
+    "hey": [
+      "Hey there! What's up?",
+      "Hi! How can I assist you?",
+      "Hey! Good to see you!"
+    ],
+    "greetings": "Greetings to you as well! How may I assist you?",
+    "good": [
+      "That's great to hear!",
+      "Wonderful!",
+      "I'm glad things are going well!"
+    ],
+    "morning": [
+      "Good morning! Hope you have a great day ahead!",
+      "Morning! How can I help you start your day?",
+      "Good morning! What brings you here today?"
+    ],
+    "evening": [
+      "Good evening! How has your day been?",
+      "Evening! What can I help you with?",
+      "Good evening! Hope you had a productive day!"
+    ],
+    "night": [
+      "Good night! Sweet dreams!",
+      "Have a good night!",
+      "Good night! Rest well!"
+    ],
+    "bye": [
+      "Goodbye! It was nice chatting with you.",
+      "See you later! Take care!",
+      "Farewell! Have a great day ahead!"
+    ],
+    "goodbye": [
+      "Goodbye! Thanks for the chat!",
+      "See you later!",
+      "Take care! Come back anytime!"
+    ],
+    "see": "See you later! Have a wonderful time!",
+    "thanks": [
+      "You're welcome! I'm glad I could help.",
+      "No problem! Happy to assist!",
+      "You're very welcome!",
+      "Anytime! That's what I'm here for!"
+    ],
+    "thank": [
+      "You're welcome! I'm glad I could help.",
+      "Happy to help!",
+      "No problem at all!"
+    ],
+    "welcome": "You're very welcome! Is there anything else I can help with?",
+    "sorry": [
+      "No need to apologize!",
+      "It's okay, don't worry about it!",
+      "No worries at all!"
+    ],
+    "excuse": "No problem! What can I help you with?",
+    "name": [
+      "I am an enhanced chatbot created with spaCy and Python.",
+      "You can call me Enhanced Bot! I'm here to help.",
+      "I'm a friendly chatbot powered by spaCy NLP."
+    ],
+    "who": [
+      "I'm an AI chatbot designed to have conversations and answer questions.",
+      "I'm your helpful chatbot assistant!",
+      "I'm an enhanced chatbot built with Python and spaCy."
+    ],
+    "what": [
+      "I'm a chatbot that can answer questions and have conversations!",
+      "I'm here to help answer your questions and chat with you.",
+      "I can help with various topics - just ask me anything!"
+    ],
+    "help": [
+      "I can answer questions about greetings, provide information, or just chat!",
+      "I'm here to help! You can ask me about various topics or just have a conversation.",
+      "I can assist with questions, provide information, or simply chat with you!"
+    ],
+    "weather": [
+      "I don't have access to real-time weather data, but you could check a weather app!",
+      "I wish I could tell you about the weather, but I don't have that capability.",
+      "For weather information, I'd recommend checking your local weather service!"
+    ],
+    "time": [
+      "I don't have access to real-time data, but you can check your device's clock!",
+      "I can't tell you the current time, but your device should have that information!"
+    ],
+    "date": [
+      "I don't have access to today's date, but you can check your calendar!",
+      "For the current date, please check your device or calendar app!"
+    ],
+    "spacy": [
+      "spaCy is a free, open-source library for advanced Natural Language Processing (NLP) in Python.",
+      "spaCy is an industrial-strength NLP library that's great for text processing and analysis!",
+      "spaCy provides fast and accurate linguistic annotations for text processing tasks."
+    ],
+    "python": [
+      "Python is a versatile programming language that's great for AI and data science!",
+      "Python is the language I'm built with! It's powerful and beginner-friendly.",
+      "Python is an excellent choice for machine learning and natural language processing!"
+    ],
+    "ai": [
+      "Artificial Intelligence is fascinating! It's the technology that powers chatbots like me.",
+      "AI is revolutionizing how we interact with technology and process information.",
+      "I'm an example of AI in action - specifically natural language processing!"
+    ],
+    "machine": [
+      "Machine learning is how AI systems like me learn patterns from data!",
+      "Machine learning enables computers to learn and improve without explicit programming."
+    ],
+    "learn": [
+      "Learning is amazing! I use machine learning to understand and respond to text.",
+      "I'm always learning from our conversations to provide better responses!"
+    ],
+    "food": [
+      "I don't eat, but I hear food is quite enjoyable for humans!",
+      "Food sounds interesting! What's your favorite cuisine?",
+      "I may not eat, but I'd love to hear about your favorite foods!"
+    ],
+    "music": [
+      "Music is a wonderful form of expression! What kind of music do you enjoy?",
+      "I don't listen to music, but I understand it brings joy to many people!",
+      "Music is fascinating - it can convey emotions and tell stories!"
+    ],
+    "book": [
+      "Books are amazing for learning and entertainment! Do you have a favorite genre?",
+      "Reading is such a great way to expand knowledge and imagination!",
+      "I process text, but I imagine reading books is quite enjoyable!"
+    ],
+    "movie": [
+      "Movies are a great form of storytelling! What's your favorite genre?",
+      "I don't watch movies, but I understand they're very popular entertainment!",
+      "Cinema is such an interesting art form combining visuals and storytelling!"
+    ],
+    "game": [
+      "Games can be fun and engaging! Do you enjoy video games or board games?",
+      "Gaming is a popular form of entertainment and can even be educational!",
+      "I don't play games myself, but I understand they can be quite enjoyable!"
+    ],
+    "work": [
+      "Work can be fulfilling when you enjoy what you do! What kind of work interests you?",
+      "I hope your work is going well! Having meaningful work is important.",
+      "My 'work' is chatting with people like you - and I enjoy it!"
+    ],
+    "school": [
+      "Education is so important! Are you currently studying something?",
+      "School can be challenging but rewarding. What subjects interest you most?",
+      "Learning never stops! I'm curious about what you're studying."
+    ],
+    "love": [
+      "Love is a beautiful human emotion that brings people together!",
+      "Love in its many forms is what makes life meaningful for many people.",
+      "That's wonderful! Love and connection are so important."
+    ],
+    "happy": [
+      "I'm so glad to hear you're happy! That's wonderful!",
+      "Happiness is contagious! Your positive mood is great to see.",
+      "That's fantastic! What's making you happy today?"
+    ],
+    "sad": [
+      "I'm sorry to hear you're feeling sad. Is there anything I can do to help?",
+      "Sadness is a natural emotion. Sometimes talking about it can help.",
+      "I hope things get better for you soon. I'm here if you want to talk."
+    ],
+    "angry": [
+      "I understand you might be feeling frustrated. Want to talk about it?",
+      "Anger is a normal emotion. Sometimes it helps to express what's bothering you.",
+      "I'm here to listen if you need to vent or talk through what's making you angry."
+    ],
+    "excited": [
+      "That's awesome! I love your enthusiasm! What has you so excited?",
+      "Excitement is such a great feeling! What's got you so energized?",
+      "Your excitement is infectious! Tell me more!"
+    ],
+    "tired": [
+      "Being tired is tough. Make sure you're getting enough rest!",
+      "Fatigue can really affect how we feel. Have you been getting enough sleep?",
+      "I hope you can get some good rest soon!"
+    ],
+    "stress": [
+      "Stress can be overwhelming. Taking deep breaths and breaks can help.",
+      "Managing stress is important for your wellbeing. What's causing you stress?",
+      "I understand stress can be difficult. Is there anything specific bothering you?"
+    ],
+    "family": [
+      "Family relationships are so important! I hope yours are doing well.",
+      "Family can be a great source of support and love.",
+      "I hope you have wonderful relationships with your family members!"
+    ],
+    "friend": [
+      "Friends make life so much better! Good friendships are precious.",
+      "Friendship is one of life's greatest gifts. I hope you have great friends!",
+      "I'm like a digital friend - always here when you need someone to chat with!"
+    ],
+    "travel": [
+      "Travel sounds exciting! I'd love to hear about places you've been or want to visit.",
+      "Exploring new places must be amazing! Where would you most like to travel?",
+      "I don't travel myself, but I love hearing about people's adventures!"
+    ],
+    "hobby": [
+      "Hobbies are great for relaxation and personal growth! What do you enjoy doing?",
+      "Having hobbies makes life more interesting and fulfilling!",
+      "I'm curious about your interests and hobbies!"
+    ],
+    "sport": [
+      "Sports can be exciting both to play and watch! Do you have a favorite sport?",
+      "Athletic activities are great for health and fun!",
+      "I don't play sports, but I understand they bring people together!"
+    ],
+    "health": [
+      "Health is so important! I hope you're taking good care of yourself.",
+      "Maintaining good health involves both physical and mental wellbeing.",
+      "Your health and wellbeing are important - I hope you're doing well!"
+    ],
+    "exercise": [
+      "Exercise is great for both physical and mental health!",
+      "Staying active is so beneficial! Do you have a favorite way to exercise?",
+      "Regular movement and activity are important for wellbeing!"
+    ],
+    "technology": [
+      "Technology is fascinating and constantly evolving! I'm a product of it myself.",
+      "Tech has transformed how we communicate and live our daily lives.",
+      "As an AI, I find technology developments really interesting!"
+    ],
+    "computer": [
+      "Computers are amazing machines that have revolutionized our world!",
+      "I exist thanks to computer technology - it's quite remarkable!",
+      "Computing technology enables so many possibilities, including our conversation!"
+    ],
+    "internet": [
+      "The internet has connected the world in unprecedented ways!",
+      "Online connectivity has transformed communication and information sharing.",
+      "The digital age has brought us closer together through platforms and connections!"
+    ],
+    "phone": [
+      "Smartphones have become such an integral part of modern life!",
+      "Mobile technology has made communication instant and global!",
+      "Phones have evolved so much - from simple calls to powerful computers!"
+    ],
+    "future": [
+      "The future is full of possibilities and exciting developments!",
+      "I'm curious about what technological advances the future will bring!",
+      "The future of AI and human collaboration looks very promising!"
+    ],
+    "past": [
+      "The past shapes who we are and provides valuable lessons.",
+      "History is fascinating - so much has happened to bring us to this moment!",
+      "Learning from the past helps us make better decisions going forward."
+    ],
+    "present": [
+      "Living in the present moment is so important for happiness!",
+      "Right now, we're having this conversation - and that's pretty amazing!",
+      "The present is all we really have - it's good to appreciate it!"
+    ],
+    "question": [
+      "I love questions! They're how we learn and grow. What would you like to know?",
+      "Feel free to ask me anything - I'm here to help and chat!",
+      "Questions are great! They show curiosity and desire to learn."
+    ],
+    "answer": [
+      "I do my best to provide helpful answers! Is there something specific you'd like to know?",
+      "I'm here to answer whatever I can! What's on your mind?",
+      "Answers are what I'm designed to provide - along with good conversation!"
+    ],
+    "problem": [
+      "Problems are opportunities to find solutions! What's troubling you?",
+      "I'm here to help if you'd like to talk through any problems you're facing.",
+      "Every problem has a solution - sometimes we just need to find the right approach."
+    ],
+    "solution": [
+      "Finding solutions is satisfying! I'm happy to help brainstorm if you need it.",
+      "Solutions often come from looking at problems from different angles.",
+      "I love helping people work through challenges to find solutions!"
+    ],
+    "idea": [
+      "Ideas are the building blocks of innovation! What's your latest idea?",
+      "Great ideas can change the world! I'd love to hear what you're thinking about.",
+      "Creativity and new ideas make life exciting!"
+    ],
+    "creative": [
+      "Creativity is such a wonderful human trait! Are you working on anything creative?",
+      "Creative expression comes in so many forms - art, writing, music, and more!",
+      "I'm fascinated by human creativity and imagination!"
+    ],
+    "art": [
+      "Art is a beautiful form of human expression! Do you enjoy creating or viewing art?",
+      "Artistic expression can convey emotions and ideas in powerful ways.",
+      "I may not create visual art, but I appreciate its beauty and meaning!"
+    ],
+    "beautiful": [
+      "Beauty can be found in so many places - nature, art, relationships, ideas!",
+      "That's wonderful that you find beauty in things! It makes life richer.",
+      "Beauty is subjective but universally appreciated in some form."
+    ],
+    "nature": [
+      "Nature is incredible - from tiny ecosystems to vast landscapes!",
+      "The natural world is full of wonder and beauty.",
+      "I find it fascinating how complex and interconnected natural systems are!"
+    ],
+    "animal": [
+      "Animals are amazing creatures! Do you have any pets or favorite animals?",
+      "The diversity of animal life on Earth is truly remarkable!",
+      "Animals can bring so much joy and companionship to people's lives."
+    ],
+    "pet": [
+      "Pets can be such wonderful companions! Do you have any pets?",
+      "The bond between humans and their pets is really special.",
+      "Pets bring so much love and joy to their families!"
+    ],
+    "favorite": [
+      "Everyone has their favorites! What are some of your favorite things?",
+      "Favorites tell us a lot about what brings people joy and meaning.",
+      "I'd love to hear about your favorite things - books, movies, activities!"
+    ],
+    "best": [
+      "The best things in life are often the simplest - good conversations, kindness, laughter!",
+      "What do you consider the best part of your day?",
+      "Best is subjective, but I think human connection is pretty amazing!"
+    ],
+    "amazing": [
+      "Amazing things are all around us if we take time to notice!",
+      "I think our ability to have this conversation across digital space is pretty amazing!",
+      "Life is full of amazing moments and experiences!"
+    ],
+    "wonderful": [
+      "The world is full of wonderful things and people!",
+      "It's wonderful when we can appreciate the good things in life.",
+      "I find human curiosity and kindness to be wonderful traits!"
+    ],
+    "interesting": [
+      "I find so many things interesting - especially learning about people's thoughts and experiences!",
+      "Interesting conversations are what make interactions meaningful.",
+      "What's been the most interesting part of your day?"
+    ],
+    "fun": [
+      "Fun is so important for happiness and wellbeing!",
+      "What do you like to do for fun? I enjoy our conversations!",
+      "Life should have plenty of fun and laughter in it!"
+    ],
+    "joke": [
+      "I appreciate humor, though my joke-telling abilities are still developing!",
+      "Laughter is such great medicine! Do you have a favorite type of humor?",
+      "Jokes and humor bring people together and make difficult times easier!"
+    ],
+    "laugh": [
+      "Laughter is one of the best sounds in the world!",
+      "I love when conversations bring joy and laughter!",
+      "A good laugh can completely change your mood for the better!"
+    ],
+    "robot": [
+      "I'm a helpful AI assistant built with Python!"
+    ]
+  },
+  "pattern_responses": [
+    {
+      "pattern": "my name is (\\w+)",
+      "responses": [
+        "Nice to meet you, {1}! That's a lovely name.",
+        "Hello {1}! I'm pleased to make your acquaintance.",
+        "Great to meet you, {1}! How are you doing today?"
+      ]
+    },
+    {
+      "pattern": "i am (\\d+) years old",
+      "responses": [
+        "That's a great age! How are you enjoying being {1}?",
+        "{1} is a wonderful age! What's your favorite thing about this stage of life?",
+        "Nice! I hope {1} is treating you well!"
+      ]
+    },
+    {
+      "pattern": "i (love|like|enjoy) (.*)",
+      "responses": [
+        "That's great that you {1} {2}! What specifically do you enjoy about it?",
+        "It's wonderful that {2} brings you joy! Tell me more about it.",
+        "I can tell {2} is important to you! What got you interested in it?"
+      ]
+    },
+    {
+      "pattern": "i (hate|dislike|don't like) (.*)",
+      "responses": [
+        "I understand that {2} isn't your favorite. What is it about {2} that bothers you?",
+        "That's okay - we all have things we don't enjoy. Is there something you prefer instead of {2}?",
+        "I can see why {2} might not appeal to everyone. What would you rather talk about?"
+      ]
+    },
+    {
+      "pattern": "what (is|are) your (.*)",
+      "responses": [
+        "That's an interesting question about my {2}! As an AI, I experience things differently than humans.",
+        "I don't have {2} in the traditional sense, but I enjoy our conversations!",
+        "That's a thoughtful question! I'm designed to be helpful and engaging rather than having personal {2}."
+      ]
+    },
+    {
+      "pattern": "tell me about (.*)",
+      "responses": [
+        "I'd love to share what I know about {1}! What specifically interests you about it?",
+        "{1} is a fascinating topic! What aspect of {1} would you like to explore?",
+        "Great question about {1}! I'm happy to discuss it - what would you like to know?"
+      ]
+    },
+    {
+      "pattern": "how (.*) you",
+      "responses": [
+        "As an AI, I don't {1} in the traditional sense, but I'm functioning well and enjoying our chat!",
+        "That's a thoughtful question! I'm designed to be helpful and engaging.",
+        "I appreciate you asking! I'm here and ready to help with whatever you need."
+      ]
+    },
+    {
+      "pattern": "can you (.*)",
+      "responses": [
+        "I'll do my best to {1}! What specifically would you like me to help with?",
+        "I'd be happy to try to {1}! Can you give me more details?",
+        "Let me see if I can {1} for you! What exactly are you looking for?"
+      ]
+    },
+    {
+      "pattern": "(yes|yeah|yep|sure|okay|ok)",
+      "responses": [
+        "Great! What would you like to talk about next?",
+        "Awesome! I'm here to help with whatever you need.",
+        "Perfect! What's on your mind?"
+      ]
+    },
+    {
+      "pattern": "(no|nope|nah|not really)",
+      "responses": [
+        "That's okay! Is there something else you'd prefer to discuss?",
+        "No problem! What would you be interested in talking about?",
+        "Fair enough! I'm here for whatever you'd like to chat about."
+      ]
+    }
+  ],
+  "fallback_responses": [
+    "I'm not sure I understand completely. Could you tell me more about that?",
+    "That's an interesting thought! What else is on your mind?",
+    "I'm still learning, so I might not have the perfect response. Can you rephrase that?",
+    "Tell me more about what you're thinking - I'd love to understand better!",
+    "I'm here to chat and help however I can. What would you like to talk about?",
+    "That's a unique way of putting it! Could you elaborate a bit more?",
+    "I want to give you a good response - can you help me understand what you mean?",
+    "Interesting perspective! I'm curious to hear more of your thoughts.",
+    "I'm processing what you said - could you give me a bit more context?",
+    "That's thought-provoking! What made you think about that?",
+    "I'm here to listen and chat! What's really on your mind today?",
+    "Every conversation teaches me something new! What would you like to explore together?",
+    "I appreciate you sharing that with me. What else would you like to discuss?",
+    "Your thoughts are interesting! I'm here to engage with whatever you'd like to talk about.",
+    "I may not have all the answers, but I'm definitely interested in continuing our conversation!"
+  ],
+  "context_responses": {
+    "technology programming coding": [
+      "Programming and technology are fascinating fields! Are you working on any coding projects?",
+      "The world of technology moves so fast! What programming languages or tech topics interest you most?",
+      "I love talking about technology! From AI to web development, there's always something exciting happening."
+    ],
+    "science research discovery": [
+      "Scientific discovery is so exciting! What areas of science capture your imagination?",
+      "Research and discovery drive human progress! Are you involved in any scientific work?",
+      "Science helps us understand our world better. What recent discoveries have caught your attention?"
+    ],
+    "education learning study": [
+      "Learning is a lifelong journey! What subjects are you most passionate about studying?",
+      "Education opens so many doors! Are you currently studying something specific?",
+      "I believe continuous learning keeps life interesting! What's your favorite way to learn new things?"
+    ],
+    "health fitness wellness": [
+      "Health and wellness are so important! How do you like to stay healthy and active?",
+      "Taking care of both physical and mental health is crucial! What wellness practices work best for you?",
+      "Fitness and wellness mean different things to everyone. What does a healthy lifestyle look like for you?"
+    ],
+    "entertainment movies music books": [
+      "Entertainment comes in so many forms! What's your favorite way to unwind and have fun?",
+      "Movies, music, and books can transport us to different worlds! What genres do you enjoy most?",
+      "Creative entertainment enriches our lives! Do you prefer creating or consuming entertainment content?"
+    ],
+    "travel adventure exploration": [
+      "Travel and adventure sound amazing! What's the most interesting place you've visited or want to visit?",
+      "Exploring new places broadens perspectives! Are you more of a local explorer or international traveler?",
+      "Adventures create the best memories! What kind of experiences do you seek when traveling?"
+    ],
+    "food cooking cuisine": [
+      "Food brings people together! Do you enjoy cooking or prefer trying restaurants?",
+      "Culinary experiences are so diverse across cultures! What cuisines do you enjoy most?",
+      "Cooking can be both practical and creative! What's your favorite dish to make or eat?"
+    ],
+    "relationships family friends": [
+      "Relationships are what make life meaningful! How do you like to spend time with people you care about?",
+      "Strong connections with family and friends are so valuable! What makes relationships work well for you?",
+      "Human connections are beautiful! Do you prefer large gatherings or intimate conversations?"
+    ],
+    "work career job business": [
+      "Career and work take up so much of our lives! What kind of work gives you satisfaction?",
+      "Professional growth and finding meaningful work are important! What drives you in your career?",
+      "The world of work is changing rapidly! How do you stay motivated and engaged professionally?"
+    ],
+    "creativity art design": [
+      "Creative expression is so important for the human spirit! What forms of creativity appeal to you?",
+      "Art and design shape how we see and experience the world! Do you create or appreciate creative works?",
+      "Creativity can be found everywhere - from solving problems to making art! How do you express your creativity?"
+    ],
+    "philosophy thinking meaning": [
+      "Deep thinking about life's meaning is fascinating! What philosophical questions interest you most?",
+      "Philosophy helps us examine our beliefs and values! Do you enjoy pondering life's big questions?",
+      "Contemplating existence and meaning can be both challenging and rewarding! What thoughts occupy your mind?"
+    ],
+    "emotions feelings mood": [
+      "Emotions are such a rich part of human experience! How are you feeling today?",
+      "Understanding and managing emotions is important for wellbeing! What helps you process your feelings?",
+      "Feelings give color to our experiences! I'm here if you want to talk about anything on your mind."
+    ],
+    "goals dreams aspirations": [
+      "Having goals and dreams gives life direction! What aspirations are you working toward?",
+      "Dreams motivate us to grow and achieve! What goals are most important to you right now?",
+      "Aspirations help us imagine better futures! I'd love to hear about what you're hoping to accomplish."
+    ],
+    "problems challenges difficulties": [
+      "Everyone faces challenges - they're part of growth! Is there anything you'd like to talk through?",
+      "Problems often contain the seeds of solutions! What difficulties are you working through?",
+      "Challenges can be tough, but they also build resilience! How do you typically approach problems?"
+    ],
+    "success achievement accomplishment": [
+      "Success means different things to everyone! What achievements make you most proud?",
+      "Accomplishments are worth celebrating! What recent successes have you experienced?",
+      "Achievement often comes through persistence and effort! What goals are you working to accomplish?"
+    ],
+    "time past present future": [
+      "Time is such an interesting concept! Do you prefer reflecting on the past or planning for the future?",
+      "Living in the moment while learning from the past and planning for the future is an art! How do you balance time perspectives?",
+      "Time passes differently in different situations! What moments feel most meaningful to you?"
+    ]
+  }
+}

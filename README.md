@@ -1,0 +1,161 @@
+# Instagram Downloader Bot
+
+A Telegram bot that downloads content from Instagram posts, reels, and carousels using gallery-dl with Firefox cookies.
+
+## Features
+
+- Download Instagram posts (single image/video)
+- Download Instagram reels
+- Download Instagram carousels (multiple images/videos)
+- Upload files to Telegram with progress tracking
+- SQLite database for operation logging
+- Browser cookie authentication (Firefox)
+- Automatic file type detection
+- Configurable upload methods (Bot API or Telethon)
+- Smart retry mechanism with exponential backoff
+- Progress tracking for downloads and uploads
+- Comprehensive error handling
+- Rate limiting and flood control
+- Configurable file watching
+- Enhanced session management
+
+Note: Stories and highlights are not supported as they require Instagram's private API access.
+
+## Requirements
+
+- Python 3.10 or higher
+- Firefox browser (for Instagram authentication)
+- Access to Telegram API (bot token, API ID, and API hash)
+
+## Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/kelvitz716/instagram.git
+cd instagram
+```
+
+2. Create a virtual environment and activate it:
+```bash
+python -m venv myenv
+source myenv/bin/activate  # Linux/macOS
+# or
+myenv\Scripts\activate  # Windows
+```
+
+3. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+4. Copy and configure environment variables:
+```bash
+cp example.env .env
+# Edit .env with your settings
+```
+
+Required settings:
+```env
+BOT_TOKEN=your_telegram_bot_token
+API_ID=your_telegram_api_id
+API_HASH=your_telegram_api_hash
+TARGET_CHAT_ID=your_target_chat_id
+```
+
+Optional settings (see example.env for all options):
+```env
+INSTAGRAM_USERNAME=your_instagram_username
+FIREFOX_COOKIES_PATH=custom/path/to/cookies.sqlite
+MAX_CONCURRENT_UPLOADS=3
+BATCH_SIZE=10
+FILE_WATCHER_ENABLED=true
+```
+
+5. Log in to Instagram in Firefox:
+- Open Firefox
+- Go to instagram.com
+- Log in to your account
+- Make sure to check "Remember me"
+
+## Usage
+
+1. Start the bot:
+```bash
+python bot.py
+```
+
+2. In Telegram, send commands to the bot:
+- `/instagram <url>` - Download Instagram post, carousel, or reel
+- `/login [username]` - Log in with Firefox cookies
+- `/stats` - Show detailed statistics
+- `/debug_firefox` - Debug Firefox cookie detection
+
+Note: Simply paste the URL of any Instagram post, carousel, or reel to download it.
+
+## Enhanced Features
+
+### Smart Upload Selection
+- Automatically chooses between Bot API and Telethon based on file size
+- Fallback mechanism for failed uploads
+- Configurable size thresholds
+
+### Progress Tracking
+- Download progress with percentage and file size
+- Upload progress for large files
+- Batch processing status updates
+- Rate-limited status messages
+
+### Error Handling
+- Exponential backoff for retries
+- Network error recovery
+- Flood control protection
+- Session management and renewal
+
+### File Management
+- Automatic file type detection
+- Support for various media formats
+- Temporary file cleanup
+- Organized directory structure
+
+### Performance
+- Concurrent upload handling
+- Rate limiting protection
+- Memory usage optimization
+- Connection pooling
+
+## Architecture
+
+The bot follows a service-based architecture:
+
+```
+instagram-bot/
+├── src/
+│   ├── bot.py              # Main bot implementation
+│   ├── core/               # Core functionality
+│   │   ├── config.py       # Configuration classes
+│   │   ├── load_config.py  # Environment loading
+│   │   └── ...
+│   ├── services/          # Service modules
+│   │   ├── database.py    # Database operations
+│   │   ├── upload.py      # File upload handling
+│   │   └── ...
+│   └── utils/            # Utility functions
+├── tests/               # Test files
+├── bot.py              # Entry point
+└── requirements.txt    # Dependencies
+```
+
+## Configuration
+
+See `example.env` for all available configuration options, including:
+- Telegram settings
+- Instagram options
+- Upload configurations
+- Database settings
+- File watcher options
+- Logging preferences
+- Performance tuning
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.

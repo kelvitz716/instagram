@@ -1,0 +1,49 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+myenv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+
+# Virtual Environment
+venv/
+ENV/
+
+# Downloads and Uploads (we'll mount these as volumes)
+downloads/
+uploads/
+temp/
+
+# Database (we'll mount this as a volume)
+bot_data.db
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment variables
+.env
+example.env
+
+# Session files
+*.session
+*.session-journal

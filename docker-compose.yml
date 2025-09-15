@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    volumes:
+      # Database persistence
+      - ./bot_data.db:/app/bot_data.db
+      # Downloads persistence
+      - ./downloads:/app/downloads
+      # Uploads persistence
+      - ./uploads:/app/uploads
+      # Firefox cookie file (read-only)
+      - ${HOME}/.mozilla/firefox/*/cookies.sqlite:/app/.mozilla/firefox/cookies.sqlite:ro
+      - ${HOME}/.mozilla/firefox/*/cookies.sqlite-shm:/app/.mozilla/firefox/cookies.sqlite-shm:ro
+      - ${HOME}/.mozilla/firefox/*/cookies.sqlite-wal:/app/.mozilla/firefox/cookies.sqlite-wal:ro
+    env_file:
+      - .env
+    environment:
+      - TZ=UTC
+      - FIREFOX_COOKIES_PATH=/app/.mozilla/firefox/cookies.sqlite
+    restart: unless-stopped
+    init: true
+    
+volumes:
+  downloads:
+  uploads:
