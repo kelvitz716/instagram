@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  bot:
+  bot:lo
     build: .
     volumes:
       # Database persistence

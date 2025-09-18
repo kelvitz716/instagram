@@ -1,5 +1,3 @@
-
-#src/bot.py
 #!/usr/bin/env python3
 """
 Instagram Content Downloader Bot

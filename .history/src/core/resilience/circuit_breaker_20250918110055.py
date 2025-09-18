@@ -1,4 +1,4 @@
-# src/core/resilience/circuit_breaker.py
+#
 """Circuit breaker pattern implementation for handling service failures."""
 
 import asyncio

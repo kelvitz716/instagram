@@ -211,18 +211,14 @@ class InstagramSessionManager:
                     timeout=10 + (attempt * 5)  # Increase timeout with each retry
                 )
                 
-                if response.status_code == 200 and '"status":"ok"' in response.text:
+                if response.status_code == 200:
                     return True, "Session is valid"
-                elif response.status_code in (429, 403):
+                elif response.status_code == 429:
                     msg = "Rate limited by Instagram. Please wait a few minutes."
-                    logger.warning(msg)
-                    raise InstagramSessionError(msg, is_rate_limit=True)
-                elif response.status_code == 401:
-                    msg = "Session expired. Please log in to Instagram in Firefox."
                     logger.warning(msg)
                     return False, msg
                 else:
-                    last_error = f"Invalid response: {response.status_code} - {response.text[:200]}"
+                    last_error = f"Invalid response: {response.status_code}"
                     
             except requests.exceptions.Timeout:
                 last_error = "Request timed out. Instagram might be slow or network issues."

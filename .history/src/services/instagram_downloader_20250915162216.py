@@ -3,7 +3,6 @@ import asyncio
 import logging
 import re
 import json
-import sys
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
@@ -48,10 +47,9 @@ class InstagramDownloader:
             raise
             
         # Path to executables
-        # Look for executables in virtualenv bin directory
-        venv_bin = Path(sys.executable).parent
-        self.gallery_dl_path = venv_bin / "gallery-dl"
-        self.yt_dlp_path = venv_bin / "yt-dlp"
+        # In Docker, these will be in the system path
+        self.gallery_dl_path = Path("gallery-dl")
+        self.yt_dlp_path = Path("yt-dlp")
         
     async def _check_session_before_download(self) -> bool:
         """Check if we have a valid session before attempting download.
@@ -210,11 +208,8 @@ class InstagramDownloader:
             output_path = self.downloads_path / timestamp
             output_path.mkdir(parents=True, exist_ok=True)
             
-            # Clean up the URL 
+            # Clean up the URL
             url = url.split("?")[0]  # Remove query parameters
-            
-            # Convert reels/ID to reel/ID format that gallery-dl expects
-            url = re.sub(r'instagram\.com/reels/([A-Za-z0-9_-]+)', r'instagram.com/reel/\1', url)
             
             # Prepare gallery-dl command with more verbose output
             cmd = [

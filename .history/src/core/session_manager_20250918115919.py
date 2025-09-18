@@ -174,23 +174,10 @@ class InstagramSessionManager:
             Tuple[bool, str]: (is_valid, message)
         """
         headers = {
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/119.0',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json',
             'X-CSRFToken': self._session_cookies.get('csrftoken', ''),
-            'X-IG-App-ID': '936619743392459',
-            'X-ASBD-ID': '129477',
-            'X-IG-WWW-Claim': '0',
-            'X-Requested-With': 'XMLHttpRequest',
-            'Connection': 'keep-alive',
-            'Referer': 'https://www.instagram.com/',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin',
-            'DNT': '1',
-            'Pragma': 'no-cache',
-            'Cache-Control': 'no-cache'
+            'X-Requested-With': 'XMLHttpRequest'
         }
         
         cookies = {name: value for name, value in self._session_cookies.items()}
@@ -200,29 +187,22 @@ class InstagramSessionManager:
             try:
                 if attempt > 0:
                     logger.info(f"Retrying session test (attempt {attempt}/{max_retries})")
-                    # Add increasing delay between retries
-                    time.sleep(5 * attempt)
                     
-                # Use a more reliable public API endpoint
                 response = requests.get(
-                    'https://www.instagram.com/api/v1/users/web_profile_info/?username=instagram',
+                    'https://www.instagram.com/accounts/onetap/?next=%2F',
                     headers=headers,
                     cookies=cookies,
                     timeout=10 + (attempt * 5)  # Increase timeout with each retry
                 )
                 
-                if response.status_code == 200 and '"status":"ok"' in response.text:
+                if response.status_code == 200:
                     return True, "Session is valid"
-                elif response.status_code in (429, 403):
+                elif response.status_code == 429:
                     msg = "Rate limited by Instagram. Please wait a few minutes."
-                    logger.warning(msg)
-                    raise InstagramSessionError(msg, is_rate_limit=True)
-                elif response.status_code == 401:
-                    msg = "Session expired. Please log in to Instagram in Firefox."
                     logger.warning(msg)
                     return False, msg
                 else:
-                    last_error = f"Invalid response: {response.status_code} - {response.text[:200]}"
+                    last_error = f"Invalid response: {response.status_code}"
                     
             except requests.exceptions.Timeout:
                 last_error = "Request timed out. Instagram might be slow or network issues."

@@ -210,11 +210,8 @@ class InstagramDownloader:
             output_path = self.downloads_path / timestamp
             output_path.mkdir(parents=True, exist_ok=True)
             
-            # Clean up the URL 
+            # Clean up the URL
             url = url.split("?")[0]  # Remove query parameters
-            
-            # Convert reels/ID to reel/ID format that gallery-dl expects
-            url = re.sub(r'instagram\.com/reels/([A-Za-z0-9_-]+)', r'instagram.com/reel/\1', url)
             
             # Prepare gallery-dl command with more verbose output
             cmd = [
