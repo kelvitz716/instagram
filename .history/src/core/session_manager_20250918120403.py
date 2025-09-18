@@ -36,16 +36,7 @@ class InstagramSessionManager:
         self.username = username
         self._session_cookies: Dict[str, str] = {}
         self._last_cookie_refresh = None  # Timestamp of last successful cookie refresh
-        # Use compatibility wrapper so tests can patch cookie loading easily
-        try:
-            res = self._load_cookies_from_browser()
-            # If the compatibility wrapper was mocked to return a cookie dict,
-            # use it to initialize internal state.
-            if isinstance(res, dict):
-                self._session_cookies = res
-        except AttributeError:
-            # Fallback if wrapper not present for any reason
-            self._load_cookies()
+        self._load_cookies()
     
     def _load_cookies(self, max_retries: int = 3, initial_delay: float = 1.0) -> None:
         """Load cookies from Firefox and validate them with retries.
@@ -71,25 +62,10 @@ class InstagramSessionManager:
                 
                 # Load new cookies
                 for cookie in cookies:
-                    # Accept cookies where domain endswith instagram.com (many cookie
-                    # entries use subdomains or lack leading dot). Be tolerant of
-                    # unittest.mock.Mock shapes where attributes may be on
-                    # _mock_name instead of .name.
-                    domain = getattr(cookie, 'domain', None)
-                    if not domain:
-                        continue
-                    if not str(domain).lower().endswith('instagram.com'):
-                        continue
-
-                    name = getattr(cookie, 'name', None) or getattr(cookie, '_mock_name', None)
-                    value = getattr(cookie, 'value', None)
-                    if not name or value is None:
-                        # Skip malformed cookie mocks
-                        continue
-
-                    masked_value = f"{str(value)[:10]}..."
-                    logger.debug(f"Found cookie: {name} = {masked_value}")
-                    self._session_cookies[name] = value
+                    if cookie.domain == self.COOKIE_DOMAIN:
+                        masked_value = f"{str(cookie.value)[:10]}..."
+                        logger.debug(f"Found cookie: {cookie.name} = {masked_value}")
+                        self._session_cookies[cookie.name] = cookie.value
 
                 # Check if cookies actually changed
                 if self._session_cookies != old_cookies:
@@ -104,18 +80,14 @@ class InstagramSessionManager:
                 logger.info("Successfully loaded Instagram cookies from Firefox")
                 return  # Success!
 
-            except (Exception, PermissionError) as e:
-                if "browser_cookie3" in str(type(e)):  # Handle BrowserCookieError without direct class access
-                    last_error = f"Browser access error: {str(e)}. Please ensure Firefox is not running in private mode."
-                    logger.warning(f"Cookie load attempt {attempt + 1} failed: {last_error}")
-                elif isinstance(e, InstagramSessionError):
-                    if getattr(e, 'is_rate_limit', False):
-                        raise  # Don't retry rate limit errors
-                    last_error = str(e)
-                    logger.warning(f"Cookie load attempt {attempt + 1} failed: {last_error}")
-                else:
-                    last_error = f"Unexpected error: {str(e)}"
-                    logger.warning(f"Cookie load attempt {attempt + 1} failed: {last_error}")
+            except (browser_cookie3.BrowserCookieError, PermissionError) as e:
+                last_error = f"Browser access error: {str(e)}. Please ensure Firefox is not running in private mode."
+                logger.warning(f"Cookie load attempt {attempt + 1} failed: {last_error}")
+            except InstagramSessionError as e:
+                if e.is_rate_limit:
+                    raise  # Don't retry rate limit errors
+                last_error = str(e)
+                logger.warning(f"Cookie load attempt {attempt + 1} failed: {last_error}")
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"Cookie load attempt {attempt + 1} failed: {last_error}")
@@ -129,15 +101,6 @@ class InstagramSessionManager:
         error_msg = f"Failed to load Instagram cookies after {max_retries} attempts. Last error: {last_error}"
         logger.error(error_msg)
         raise InstagramSessionError(error_msg)
-
-    # Backwards-compatible wrapper expected by tests
-    def _load_cookies_from_browser(self, *args, **kwargs):
-        """Compatibility wrapper for older tests/code that call _load_cookies_from_browser.
-
-        Returns same as _load_cookies (which sets internal state). Tests sometimes
-        mock this method to return a cookie dict, so keep a simple pass-through.
-        """
-        return self._load_cookies(*args, **kwargs)
     
     def _validate_cookies(self) -> None:
         """Validate required cookies and log their presence.
@@ -170,89 +133,6 @@ class InstagramSessionManager:
             raise InstagramSessionError(
                 "Session expired. Will try to refresh cookies from Firefox."
             )
-
-    # Public async-friendly helpers used in tests
-    async def get_cookies(self) -> Dict[str, str]:
-        """Return a copy of the current session cookies (async helper for tests)."""
-        return dict(self._session_cookies)
-
-    async def refresh_cookies(self) -> bool:
-        """Refresh cookies by loading from the browser and validating them.
-
-        This method is used by tests and will return True if cookies were
-        successfully refreshed and validated.
-        """
-        try:
-            # Load cookies directly from browser_cookie3 (tests patch this)
-            cookies = browser_cookie3.firefox()
-            # Clear existing cookies
-            self._session_cookies.clear()
-
-            # Support multiple shapes returned by browser_cookie3 or tests:
-            # - list of cookie objects (mocks with .name/.value/.domain)
-            # - dict mapping names->values
-            # - list of (name, value) tuples
-            if isinstance(cookies, dict):
-                for k, v in cookies.items():
-                    self._session_cookies[str(k)] = v
-            else:
-                for cookie in cookies:
-                    # If cookie is a simple (name, value) tuple
-                    if isinstance(cookie, (list, tuple)) and len(cookie) >= 2:
-                        name, value = cookie[0], cookie[1]
-                        # No domain information; accept provided pair
-                        if name and value is not None:
-                            self._session_cookies[str(name)] = value
-                        continue
-
-                    # If cookie behaves like a mapping
-                    if hasattr(cookie, 'get') and not hasattr(cookie, '_mock_name'):
-                        name = cookie.get('name') or cookie.get('_mock_name')
-                        value = cookie.get('value') or cookie.get('_mock_value')
-                        domain = cookie.get('domain') or cookie.get('host')
-                    else:
-                        # Typical cookie object or Mock with attributes
-                            # Prefer _mock_name when it's a real string; some Mock
-                            # objects expose .name as another Mock attribute which
-                            # is not the cookie name.
-                            mock_name = getattr(cookie, '_mock_name', None)
-                            raw_name = getattr(cookie, 'name', None)
-                            if isinstance(mock_name, str) and mock_name:
-                                name = mock_name
-                            elif isinstance(raw_name, str) and raw_name:
-                                name = raw_name
-                            else:
-                                # If name is not a plain string, skip this cookie
-                                name = None
-
-                            value = getattr(cookie, 'value', None)
-                            if value is None:
-                                value = getattr(cookie, '_mock_value', None)
-                            domain = getattr(cookie, 'domain', None) or getattr(cookie, 'host', None)
-
-                    # If domain is present and doesn't match instagram, skip
-                    if domain and not str(domain).lower().endswith('instagram.com'):
-                        continue
-
-                    if name and value is not None:
-                        self._session_cookies[str(name)] = value
-
-            # Validate cookies (this will raise InstagramSessionError if missing).
-            # Only update _last_cookie_refresh after validation succeeds to
-            # avoid triggering the rate-limit protection when tests supply
-            # incomplete/malformed cookies.
-            self._validate_cookies()
-
-            if self._session_cookies:
-                self._last_cookie_refresh = datetime.now()
-
-            return True
-        except InstagramSessionError:
-            # Propagate session errors to the caller (tests expect exceptions in some cases)
-            raise
-        except Exception as e:
-            logger.error(f"Failed to refresh cookies: {e}")
-            return False
     
     async def refresh_session(self) -> bool:
         """Refresh session by reloading cookies from Firefox.
@@ -376,16 +256,6 @@ class InstagramSessionManager:
             return True
         except InstagramSessionError:
             return False
-
-    async def test_session(self) -> Tuple[bool, str]:
-        """Async wrapper for testing the session; calls internal _test_session."""
-        try:
-            return await self._test_session()
-        except InstagramSessionError:
-            raise
-        except Exception as e:
-            # Return a failure tuple so callers/tests can assert on the message
-            return False, f"Failed to test session: {e}"
     
     def debug_cookies(self) -> None:
         """Debug helper to log all available Instagram cookies."""

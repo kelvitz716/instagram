@@ -63,31 +63,28 @@ class InstagramDownloader:
             InstagramSessionError: If session is invalid and rate limiting is suspected
         """
         try:
-            # Call the session manager's cookie validation. Tests may patch
-            # _validate_cookies with a sync or async mock, so handle both.
+            # Validate current cookies. The real implementation is synchronous,
+            # but tests may replace this with an AsyncMock. Call it and await
+            # the result if it returns a coroutine to avoid "coroutine was never
+            # awaited" warnings during testing.
             result = self.session_manager._validate_cookies()
             if asyncio.iscoroutine(result):
                 await result
-
-            # After cookie validation, ensure session is active by attempting a
-            # lightweight refresh/test. refresh_session may be synchronous in
-            # some implementations or patched in tests; handle coroutines.
-            try:
-                refresh_res = self.session_manager.refresh_session()
-                if asyncio.iscoroutine(refresh_res):
-                    refresh_ok = await refresh_res
-                else:
-                    refresh_ok = bool(refresh_res)
-            except InstagramSessionError:
-                # Propagate rate-limit errors
-                raise
-            except Exception:
-                return False
-
-            return bool(refresh_ok)
-
+            
+            # Test session with a download attempt first
+            # If it fails, try refreshing the session once
+            valid, msg = await self.session_manager._test_session()
+            if not valid:
+                logger.warning(f"Initial session test failed: {msg}")
+                logger.info("Attempting to refresh session...")
+                
+                if not await self.session_manager.refresh_session():
+                    return False
+            
+            return True
+            
         except InstagramSessionError as e:
-            if getattr(e, 'is_rate_limit', False):
+            if e.is_rate_limit:
                 # Re-raise rate limit errors to signal manual intervention needed
                 raise
             logger.error(f"Session check failed: {e}")
@@ -269,9 +266,9 @@ class InstagramDownloader:
                     "403 forbidden",
                     "401 unauthorized"
                 ]):
-                    # Tests expect an InstagramDownloadError to be raised and
-                    # for the message to include 'authentication'
-                    raise InstagramDownloadError("authentication: Instagram authentication failed")
+                    raise InstagramSessionError(
+                        "authentication: Instagram authentication failed. Please login to Instagram in Firefox and try again."
+                    )
 
                 if "private account" in error_msg:
                     raise InstagramDownloadError(f"Cannot download from private account: {url}")

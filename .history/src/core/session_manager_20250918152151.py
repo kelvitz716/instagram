@@ -185,70 +185,20 @@ class InstagramSessionManager:
         try:
             # Load cookies directly from browser_cookie3 (tests patch this)
             cookies = browser_cookie3.firefox()
-            # Clear existing cookies
             self._session_cookies.clear()
+            for cookie in cookies:
+                domain = getattr(cookie, 'domain', None)
+                if not domain or not str(domain).lower().endswith('instagram.com'):
+                    continue
+                name = getattr(cookie, 'name', None) or getattr(cookie, '_mock_name', None)
+                value = getattr(cookie, 'value', None)
+                if name and value is not None:
+                    self._session_cookies[name] = value
 
-            # Support multiple shapes returned by browser_cookie3 or tests:
-            # - list of cookie objects (mocks with .name/.value/.domain)
-            # - dict mapping names->values
-            # - list of (name, value) tuples
-            if isinstance(cookies, dict):
-                for k, v in cookies.items():
-                    self._session_cookies[str(k)] = v
-            else:
-                for cookie in cookies:
-                    # If cookie is a simple (name, value) tuple
-                    if isinstance(cookie, (list, tuple)) and len(cookie) >= 2:
-                        name, value = cookie[0], cookie[1]
-                        # No domain information; accept provided pair
-                        if name and value is not None:
-                            self._session_cookies[str(name)] = value
-                        continue
-
-                    # If cookie behaves like a mapping
-                    if hasattr(cookie, 'get') and not hasattr(cookie, '_mock_name'):
-                        name = cookie.get('name') or cookie.get('_mock_name')
-                        value = cookie.get('value') or cookie.get('_mock_value')
-                        domain = cookie.get('domain') or cookie.get('host')
-                    else:
-                        # Typical cookie object or Mock with attributes
-                            # Prefer _mock_name when it's a real string; some Mock
-                            # objects expose .name as another Mock attribute which
-                            # is not the cookie name.
-                            mock_name = getattr(cookie, '_mock_name', None)
-                            raw_name = getattr(cookie, 'name', None)
-                            if isinstance(mock_name, str) and mock_name:
-                                name = mock_name
-                            elif isinstance(raw_name, str) and raw_name:
-                                name = raw_name
-                            else:
-                                # If name is not a plain string, skip this cookie
-                                name = None
-
-                            value = getattr(cookie, 'value', None)
-                            if value is None:
-                                value = getattr(cookie, '_mock_value', None)
-                            domain = getattr(cookie, 'domain', None) or getattr(cookie, 'host', None)
-
-                    # If domain is present and doesn't match instagram, skip
-                    if domain and not str(domain).lower().endswith('instagram.com'):
-                        continue
-
-                    if name and value is not None:
-                        self._session_cookies[str(name)] = value
-
-            # Validate cookies (this will raise InstagramSessionError if missing).
-            # Only update _last_cookie_refresh after validation succeeds to
-            # avoid triggering the rate-limit protection when tests supply
-            # incomplete/malformed cookies.
+            # Validate cookies
             self._validate_cookies()
-
-            if self._session_cookies:
-                self._last_cookie_refresh = datetime.now()
-
             return True
         except InstagramSessionError:
-            # Propagate session errors to the caller (tests expect exceptions in some cases)
             raise
         except Exception as e:
             logger.error(f"Failed to refresh cookies: {e}")

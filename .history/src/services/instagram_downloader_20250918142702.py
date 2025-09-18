@@ -63,31 +63,28 @@ class InstagramDownloader:
             InstagramSessionError: If session is invalid and rate limiting is suspected
         """
         try:
-            # Call the session manager's cookie validation. Tests may patch
-            # _validate_cookies with a sync or async mock, so handle both.
+            # Validate current cookies. The real implementation is synchronous,
+            # but tests may replace this with an AsyncMock. Call it and await
+            # the result if it returns a coroutine to avoid "coroutine was never
+            # awaited" warnings during testing.
             result = self.session_manager._validate_cookies()
             if asyncio.iscoroutine(result):
                 await result
-
-            # After cookie validation, ensure session is active by attempting a
-            # lightweight refresh/test. refresh_session may be synchronous in
-            # some implementations or patched in tests; handle coroutines.
-            try:
-                refresh_res = self.session_manager.refresh_session()
-                if asyncio.iscoroutine(refresh_res):
-                    refresh_ok = await refresh_res
-                else:
-                    refresh_ok = bool(refresh_res)
-            except InstagramSessionError:
-                # Propagate rate-limit errors
-                raise
-            except Exception:
-                return False
-
-            return bool(refresh_ok)
-
+            
+            # Test session with a download attempt first
+            # If it fails, try refreshing the session once
+            valid, msg = await self.session_manager._test_session()
+            if not valid:
+                logger.warning(f"Initial session test failed: {msg}")
+                logger.info("Attempting to refresh session...")
+                
+                if not await self.session_manager.refresh_session():
+                    return False
+            
+            return True
+            
         except InstagramSessionError as e:
-            if getattr(e, 'is_rate_limit', False):
+            if e.is_rate_limit:
                 # Re-raise rate limit errors to signal manual intervention needed
                 raise
             logger.error(f"Session check failed: {e}")
@@ -252,16 +249,8 @@ class InstagramDownloader:
             
             # Check for specific error conditions
             if result.returncode != 0:
-                error_msg = (result.stderr or "").lower()
-
-                # Map gallery-dl specific messages into clearer error categories
-                if any(phrase in error_msg for phrase in [
-                    "429",
-                    "too many requests",
-                    "rate limit"
-                ]):
-                    raise InstagramDownloadError("rate limit: gallery-dl returned rate limit")
-
+                error_msg = result.stderr.lower()
+                
                 if any(phrase in error_msg for phrase in [
                     "http redirect to login page",
                     "login required",
@@ -269,50 +258,33 @@ class InstagramDownloader:
                     "403 forbidden",
                     "401 unauthorized"
                 ]):
-                    # Tests expect an InstagramDownloadError to be raised and
-                    # for the message to include 'authentication'
-                    raise InstagramDownloadError("authentication: Instagram authentication failed")
-
-                if "private account" in error_msg:
+                    raise InstagramSessionError(
+                        "Instagram authentication failed. Please login to Instagram in Firefox and try again."
+                    )
+                elif "private account" in error_msg:
                     raise InstagramDownloadError(f"Cannot download from private account: {url}")
-
-                if "not found" in error_msg or "404" in error_msg:
+                elif "not found" in error_msg or "404" in error_msg:
                     raise InstagramDownloadError(f"Content not found: {url}")
-
-                # Normalize unknown errors to include 'download failed'
-                raise InstagramDownloadError(f"download failed: gallery-dl code {result.returncode}: {result.stderr}")
+                else:
+                    raise InstagramDownloadError(f"gallery-dl failed with code {result.returncode}: {result.stderr}")
                     
-            # Use helper to find downloaded files in the output path. Tests often
-            # patch `_find_downloaded_files` on the downloader instance, so call
-            # it here and await the result if it's a coroutine.
-            files = self._find_downloaded_files(output_path)
-            if asyncio.iscoroutine(files):
-                files = await files
-
+            # Parse the output to find downloaded files
+            files = []
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                file_path = Path(line)
+                if file_path.exists() and file_path.is_file():
+                    files.append(file_path)
+            
             if not files:
                 logger.error("No files downloaded")
                 if result.stderr:
                     logger.error(f"gallery-dl stderr: {result.stderr}")
-                # Cleanup output dir if it exists and is empty
-                try:
-                    # Remove the directory only if it's empty
-                    if output_path.exists() and not any(output_path.iterdir()):
-                        output_path.rmdir()
-                except Exception:
-                    logger.debug("Failed to cleanup output directory", exc_info=True)
-                # Also attempt to clean up possible temporary files in the
-                # parent directory (tests create files there) to ensure
-                # temporary files are removed but parent dir remains.
-                try:
-                    parent = self.downloads_path.parent
-                    for p in list(parent.iterdir()):
-                        if p.is_file():
-                            p.unlink()
-                except Exception:
-                    logger.debug("Failed to cleanup parent temp files", exc_info=True)
-
-                raise InstagramDownloadError(f"download failed: No files were downloaded from {url}: {result.stderr}")
-
+                raise InstagramDownloadError(f"No files were downloaded from {url}")
+                
             logger.info(f"Successfully downloaded {len(files)} file(s) from {url}")
             return files
             
@@ -324,20 +296,7 @@ class InstagramDownloader:
             raise
         except Exception as e:
             logger.error(f"Failed to download {url}: {e}", exc_info=True)
-            # Attempt cleanup of parent temp files as well
-            try:
-                parent = self.downloads_path.parent
-                for p in list(parent.iterdir()):
-                    if p.is_file():
-                        p.unlink()
-            except Exception:
-                logger.debug("Failed to cleanup parent temp files", exc_info=True)
-
-            # Ensure message contains 'download failed' for the tests
-            msg = str(e)
-            if 'download failed' not in msg.lower():
-                msg = f"download failed: {msg}"
-            raise InstagramDownloadError(msg)
+            raise InstagramDownloadError(f"Failed to download {url}: {str(e)}")
     
     def _find_downloaded_files(self, search_path: Path) -> List[Path]:
         """Find downloaded media files in the given path."""
@@ -462,10 +421,11 @@ class InstagramDownloader:
         if parsed.scheme not in ('http', 'https'):
             return "unknown", None
 
-        # Normalize netloc (remove port if present) and ensure exact domain or subdomain
-        netloc = parsed.netloc.lower().split(':')[0]
-        if not (netloc == 'instagram.com' or netloc.endswith('.instagram.com')):
-            return "unknown", None
+        netloc = parsed.netloc.lower()
+            # Normalize netloc (remove port if present) and ensure exact domain or subdomain
+            netloc = parsed.netloc.lower().split(':')[0]
+            if not (netloc == 'instagram.com' or netloc.endswith('.instagram.com')):
+                return "unknown", None
 
         path = parsed.path.rstrip('/')
 
@@ -489,6 +449,8 @@ class InstagramDownloader:
         if m:
             return "post", None
 
+        return "unknown", None
+                
         return "unknown", None
         
     async def download_content(self, url: str) -> List[Path]:

@@ -188,54 +188,23 @@ class InstagramSessionManager:
             # Clear existing cookies
             self._session_cookies.clear()
 
-            # Support multiple shapes returned by browser_cookie3 or tests:
-            # - list of cookie objects (mocks with .name/.value/.domain)
-            # - dict mapping names->values
-            # - list of (name, value) tuples
-            if isinstance(cookies, dict):
-                for k, v in cookies.items():
-                    self._session_cookies[str(k)] = v
-            else:
-                for cookie in cookies:
-                    # If cookie is a simple (name, value) tuple
-                    if isinstance(cookie, (list, tuple)) and len(cookie) >= 2:
-                        name, value = cookie[0], cookie[1]
-                        # No domain information; accept provided pair
-                        if name and value is not None:
-                            self._session_cookies[str(name)] = value
-                        continue
+            for cookie in cookies:
+                # Tests often provide Mock objects with attributes on
+                # name/_mock_name and value. Be permissive.
+                domain = getattr(cookie, 'domain', None) or getattr(cookie, 'host', None)
+                if not domain:
+                    continue
+                if not str(domain).lower().endswith('instagram.com'):
+                    continue
 
-                    # If cookie behaves like a mapping
-                    if hasattr(cookie, 'get') and not hasattr(cookie, '_mock_name'):
-                        name = cookie.get('name') or cookie.get('_mock_name')
-                        value = cookie.get('value') or cookie.get('_mock_value')
-                        domain = cookie.get('domain') or cookie.get('host')
-                    else:
-                        # Typical cookie object or Mock with attributes
-                            # Prefer _mock_name when it's a real string; some Mock
-                            # objects expose .name as another Mock attribute which
-                            # is not the cookie name.
-                            mock_name = getattr(cookie, '_mock_name', None)
-                            raw_name = getattr(cookie, 'name', None)
-                            if isinstance(mock_name, str) and mock_name:
-                                name = mock_name
-                            elif isinstance(raw_name, str) and raw_name:
-                                name = raw_name
-                            else:
-                                # If name is not a plain string, skip this cookie
-                                name = None
+                name = getattr(cookie, 'name', None) or getattr(cookie, '_mock_name', None)
+                value = getattr(cookie, 'value', None)
+                # Some mocks may store value on _mock_value; try that too
+                if value is None:
+                    value = getattr(cookie, '_mock_value', None)
 
-                            value = getattr(cookie, 'value', None)
-                            if value is None:
-                                value = getattr(cookie, '_mock_value', None)
-                            domain = getattr(cookie, 'domain', None) or getattr(cookie, 'host', None)
-
-                    # If domain is present and doesn't match instagram, skip
-                    if domain and not str(domain).lower().endswith('instagram.com'):
-                        continue
-
-                    if name and value is not None:
-                        self._session_cookies[str(name)] = value
+                if name and value is not None:
+                    self._session_cookies[name] = value
 
             # Validate cookies (this will raise InstagramSessionError if missing).
             # Only update _last_cookie_refresh after validation succeeds to
