@@ -28,24 +28,25 @@ class InstagramDownloader:
     Note: Stories and highlights are not supported as they require Instagram's private API access.
     """
     
-    def __init__(self, config: InstagramConfig, downloads_path: Path):
+    def __init__(self, config: InstagramConfig, downloads_path: Path, cookies_file: Optional[Path] = None):
         """Initialize the Instagram downloader.
         
         Args:
             config: Configuration for the downloader
             downloads_path: Path where downloads will be stored
+            cookies_file: Optional path to a Netscape-format cookies.txt file
         """
         self.config = config
         self.downloads_path = downloads_path
         self.downloads_path.mkdir(parents=True, exist_ok=True)
-        
-        # Initialize session manager
+
+        # Initialize session manager with cookies file if provided
         try:
-            self.session_manager = InstagramSessionManager(downloads_path, config.username)
+            self.session_manager = InstagramSessionManager(downloads_path, config.username, cookies_file=cookies_file)
         except InstagramSessionError as e:
             logger.error(f"Failed to initialize sessions: {e}")
             raise
-            
+
         # Path to executables
         self.gallery_dl_path = Path("/home/kelvitz/Github/instagram/myenv/bin/gallery-dl")
         self.yt_dlp_path = Path("/home/kelvitz/Github/instagram/myenv/bin/yt-dlp")

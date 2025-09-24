@@ -18,33 +18,30 @@ class InstagramSessionError(Exception):
         self.is_rate_limit = is_rate_limit
 
 class InstagramSessionManager:
-    """Manages Instagram sessions using Firefox cookies."""
-    
+    """Manages Instagram sessions using Firefox or Netscape-format cookies."""
+
     REQUIRED_COOKIES = ['sessionid', 'csrftoken']
     COOKIE_DOMAIN = '.instagram.com'
     MANUAL_CHECK_THRESHOLD = timedelta(minutes=10)  # If cookies refreshed within this time, might be rate limiting
     SESSION_REFRESH_URL = 'https://www.instagram.com/accounts/login/ajax/'
-    
-    def __init__(self, downloads_path: Path, username: Optional[str] = None):
+
+    def __init__(self, downloads_path: Path, username: Optional[str] = None, cookies_file: Optional[Path] = None):
         """Initialize the session manager.
         
         Args:
             downloads_path: Path where downloads and cookies will be stored
             username: Instagram username (optional)
+            cookies_file: Optional path to a Netscape-format cookies.txt file
         """
         self.downloads_path = downloads_path
         self.username = username
+        self.cookies_file = cookies_file
         self._session_cookies: Dict[str, str] = {}
         self._last_cookie_refresh = None  # Timestamp of last successful cookie refresh
         self._load_cookies()
-    
+
     def _load_cookies(self, max_retries: int = 3, initial_delay: float = 1.0) -> None:
-        """Load cookies from Firefox and validate them with retries.
-        
-        Args:
-            max_retries: Maximum number of retry attempts
-            initial_delay: Initial delay between retries (doubles with each retry)
-        """
+        """Load cookies from Netscape file (if provided) or Firefox and validate them with retries."""
         last_error = None
         delay = initial_delay
 
@@ -53,31 +50,44 @@ class InstagramSessionManager:
                 if attempt > 0:
                     logger.info(f"Retrying cookie load (attempt {attempt}/{max_retries})")
 
-                logger.info("Loading Instagram cookies from Firefox...")
-                cookies = browser_cookie3.firefox()
-                
+                if self.cookies_file and self.cookies_file.exists():
+                    logger.info(f"Loading Instagram cookies from Netscape-format file: {self.cookies_file}")
+                    cookies = self._load_netscape_cookies(self.cookies_file)
+                else:
+                    logger.info("Loading Instagram cookies from Firefox...")
+                    cookies = browser_cookie3.firefox()
+
                 # Clear existing cookies
                 old_cookies = self._session_cookies.copy()
                 self._session_cookies.clear()
-                
+
                 # Load new cookies
-                for cookie in cookies:
-                    if cookie.domain == self.COOKIE_DOMAIN:
-                        masked_value = f"{str(cookie.value)[:10]}..."
-                        logger.debug(f"Found cookie: {cookie.name} = {masked_value}")
-                        self._session_cookies[cookie.name] = cookie.value
+                if isinstance(cookies, list):
+                    # Netscape-format: list of dicts
+                    for cookie in cookies:
+                        if cookie['domain'].endswith(self.COOKIE_DOMAIN):
+                            masked_value = f"{str(cookie['value'])[:10]}..."
+                            logger.debug(f"Found cookie: {cookie['name']} = {masked_value}")
+                            self._session_cookies[cookie['name']] = cookie['value']
+                else:
+                    # browser_cookie3: CookieJar
+                    for cookie in cookies:
+                        if cookie.domain == self.COOKIE_DOMAIN:
+                            masked_value = f"{str(cookie.value)[:10]}..."
+                            logger.debug(f"Found cookie: {cookie.name} = {masked_value}")
+                            self._session_cookies[cookie.name] = cookie.value
 
                 # Check if cookies actually changed
                 if self._session_cookies != old_cookies:
                     self._last_cookie_refresh = datetime.now()
                     logger.info("Cookies were refreshed")
                 elif not self._session_cookies:
-                    raise InstagramSessionError("No Instagram cookies found in Firefox. Please ensure you're logged in.")
-                
+                    raise InstagramSessionError("No Instagram cookies found. Please ensure you're logged in or provide a valid cookies.txt file.")
+
                 # Verify and log found cookies
                 self._validate_cookies()
-                
-                logger.info("Successfully loaded Instagram cookies from Firefox")
+
+                logger.info("Successfully loaded Instagram cookies")
                 return  # Success!
 
             except (browser_cookie3.BrowserCookieError, PermissionError) as e:
@@ -91,16 +101,42 @@ class InstagramSessionManager:
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"Cookie load attempt {attempt + 1} failed: {last_error}")
-            
+
             if attempt < max_retries:
                 import time
                 time.sleep(delay)
                 delay *= 2  # Exponential backoff
-            
+
         # All retries failed
         error_msg = f"Failed to load Instagram cookies after {max_retries} attempts. Last error: {last_error}"
         logger.error(error_msg)
         raise InstagramSessionError(error_msg)
+
+    @staticmethod
+    def _load_netscape_cookies(file_path: Path) -> list:
+        """Parse a Netscape-format cookies.txt file and return a list of cookies."""
+        cookies = []
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip().startswith('#') or not line.strip():
+                        continue
+                    parts = line.strip().split('\t')
+                    if len(parts) == 7:
+                        domain, flag, path, secure, expires, name, value = parts
+                        cookies.append({
+                            'domain': domain,
+                            'name': name,
+                            'value': value,
+                            'path': path,
+                            'secure': secure == 'TRUE',
+                            'expires': int(expires) if expires.isdigit() else None
+                        })
+        except Exception as e:
+            logger.error(f"Failed to parse Netscape cookies file: {e}")
+        return cookies
+    
+
     
     def _validate_cookies(self) -> None:
         """Validate required cookies and log their presence.

@@ -192,12 +192,86 @@ class DatabaseService:
                 )
             """)
             
+            # Create session tables
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS instagram_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    session_type TEXT NOT NULL,
+                    cookies_file_path TEXT,
+                    session_data TEXT NOT NULL,
+                    is_active BOOLEAN DEFAULT 0,
+                    last_validated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP
+                )
+            """)
+            
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS session_validations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    is_valid BOOLEAN NOT NULL,
+                    error_message TEXT,
+                    checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (session_id) REFERENCES instagram_sessions (id)
+                )
+            """)
+            
             conn.execute("CREATE INDEX IF NOT EXISTS idx_operations_type ON file_operations(operation_type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_download_state_status ON download_state(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_download_state_completed ON download_state(completed)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_active ON instagram_sessions(user_id, is_active)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON instagram_sessions(expires_at)")
             
             # Prepare statements
             await self._prepare_statements(conn)
+            
+            # Prepare session statements
+            statements = {
+                'insert_session': """
+                    INSERT INTO instagram_sessions 
+                    (user_id, username, session_type, cookies_file_path, session_data, 
+                     is_active, last_validated, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                """,
+                'update_session': """
+                    UPDATE instagram_sessions 
+                    SET session_data = ?, is_active = ?, last_validated = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP, expires_at = ?
+                    WHERE id = ?
+                """,
+                'insert_validation': """
+                    INSERT INTO session_validations 
+                    (session_id, is_valid, error_message)
+                    VALUES (?, ?, ?)
+                """,
+                'get_active_session': """
+                    SELECT id, session_type, cookies_file_path, session_data, last_validated
+                    FROM instagram_sessions
+                    WHERE user_id = ? AND is_active = 1
+                    ORDER BY last_validated DESC
+                    LIMIT 1
+                """,
+                'get_all_sessions': """
+                    SELECT id, session_type, cookies_file_path, session_data, is_active, 
+                           last_validated, created_at, expires_at
+                    FROM instagram_sessions
+                    WHERE user_id = ?
+                    ORDER BY is_active DESC, last_validated DESC
+                """,
+                'delete_session': """
+                    DELETE FROM instagram_sessions WHERE id = ?
+                """,
+                'cleanup_expired_sessions': """
+                    DELETE FROM instagram_sessions 
+                    WHERE expires_at < CURRENT_TIMESTAMP
+                      OR (last_validated < datetime('now', '-7 days') AND NOT is_active)
+                """
+            }
+            self._prepared_statements.update(statements)
         finally:
             self._pool.release(conn)
     
@@ -264,6 +338,169 @@ class DatabaseService:
             return dict(stats)
         finally:
             self._pool.release(conn)
+            
+    # Session management methods
+    
+    async def store_instagram_session(self, user_id: int, username: str, 
+                                    session_type: str, session_data: str,
+                                    cookies_file_path: Optional[str] = None,
+                                    make_active: bool = True,
+                                    expires_at: Optional[datetime] = None) -> int:
+        """Store a new Instagram session."""
+        conn = self._pool.acquire()
+        try:
+            if make_active:
+                # Deactivate other sessions for this user
+                conn.execute(
+                    "UPDATE instagram_sessions SET is_active = 0 WHERE user_id = ?",
+                    (user_id,)
+                )
+            
+            cursor = conn.execute(
+                self._prepared_statements['insert_session'],
+                (user_id, username, session_type, cookies_file_path, 
+                 session_data, make_active, expires_at)
+            )
+            return cursor.lastrowid
+        finally:
+            self._pool.release(conn)
+    
+    async def get_active_session(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Get the active session for a user."""
+        conn = self._pool.acquire()
+        try:
+            cursor = conn.execute(
+                self._prepared_statements['get_active_session'],
+                (user_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'id': row[0],
+                    'session_type': row[1],
+                    'cookies_file_path': row[2],
+                    'session_data': row[3],
+                    'last_validated': row[4]
+                }
+            return None
+        finally:
+            self._pool.release(conn)
+    
+    async def get_all_sessions(self, user_id: int) -> List[Dict[str, Any]]:
+        """Get all sessions for a user."""
+        conn = self._pool.acquire()
+        try:
+            cursor = conn.execute(
+                self._prepared_statements['get_all_sessions'],
+                (user_id,)
+            )
+            rows = cursor.fetchall()
+            return [{
+                'id': row[0],
+                'session_type': row[1],
+                'cookies_file_path': row[2],
+                'session_data': row[3],
+                'is_active': bool(row[4]),
+                'last_validated': row[5],
+                'created_at': row[6],
+                'expires_at': row[7]
+            } for row in rows]
+        finally:
+            self._pool.release(conn)
+    
+    async def update_session(self, session_id: int, session_data: str,
+                           is_active: bool, expires_at: Optional[datetime] = None) -> bool:
+        """Update an existing session."""
+        conn = self._pool.acquire()
+        try:
+            cursor = conn.execute(
+                self._prepared_statements['update_session'],
+                (session_data, is_active, expires_at, session_id)
+            )
+            return cursor.rowcount > 0
+        finally:
+            self._pool.release(conn)
+    
+    async def delete_session(self, session_id: int) -> bool:
+        """Delete a session."""
+        conn = self._pool.acquire()
+        try:
+            cursor = conn.execute(
+                self._prepared_statements['delete_session'],
+                (session_id,)
+            )
+            return cursor.rowcount > 0
+        finally:
+            self._pool.release(conn)
+    
+    async def cleanup_expired_sessions(self) -> int:
+        """Clean up expired sessions. Returns number of deleted sessions."""
+        conn = self._pool.acquire()
+        try:
+            cursor = conn.execute(
+                self._prepared_statements['cleanup_expired_sessions']
+            )
+            return cursor.rowcount
+        finally:
+            self._pool.release(conn)
+    
+    async def log_session_validation(self, session_id: int, 
+                                   is_valid: bool, 
+                                   error_message: Optional[str] = None):
+        """Log a session validation attempt."""
+        conn = self._pool.acquire()
+        try:
+            conn.execute(
+                self._prepared_statements['insert_validation'],
+                (session_id, is_valid, error_message)
+            )
+        finally:
+            self._pool.release(conn)
+            
+    async def _prepare_session_statements(self, conn: sqlite3.Connection):
+        """Prepare SQL statements for session management."""
+        statements = {
+            'insert_session': """
+                INSERT INTO instagram_sessions 
+                (user_id, username, session_type, cookies_file_path, session_data, 
+                 is_active, last_validated, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            """,
+            'update_session': """
+                UPDATE instagram_sessions 
+                SET session_data = ?, is_active = ?, last_validated = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP, expires_at = ?
+                WHERE id = ?
+            """,
+            'insert_validation': """
+                INSERT INTO session_validations 
+                (session_id, is_valid, error_message)
+                VALUES (?, ?, ?)
+            """,
+            'get_active_session': """
+                SELECT id, session_type, cookies_file_path, session_data, last_validated
+                FROM instagram_sessions
+                WHERE user_id = ? AND is_active = 1
+                ORDER BY last_validated DESC
+                LIMIT 1
+            """,
+            'get_all_sessions': """
+                SELECT id, session_type, cookies_file_path, session_data, is_active, 
+                       last_validated, created_at, expires_at
+                FROM instagram_sessions
+                WHERE user_id = ?
+                ORDER BY is_active DESC, last_validated DESC
+            """,
+            'delete_session': """
+                DELETE FROM instagram_sessions WHERE id = ?
+            """,
+            'cleanup_expired_sessions': """
+                DELETE FROM instagram_sessions 
+                WHERE expires_at < CURRENT_TIMESTAMP
+                  OR (last_validated < datetime('now', '-7 days') AND NOT is_active)
+            """
+        }
+        self._prepared_statements.update(statements)
 
     async def record_download(
         self, 

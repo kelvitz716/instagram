@@ -21,6 +21,7 @@ Version: 2.0.0
 # Standard library imports
 import asyncio
 import logging
+import pathlib
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -29,12 +30,17 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # Third-party imports
 import structlog
 from rich.console import Console
-from telegram import Message, Update
+from telegram import Message, Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
-    Application, CommandHandler, ContextTypes, MessageHandler, filters
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler, 
+    filters, ContextTypes
 )
 from telegram import error as telegram_error
 from telethon import TelegramClient
+
+# Local imports
+from src.core.help_command import HelpCommandMixin
+from src.core.session_commands import SessionCommands
 
 # Local application imports
 from src.core.config import BotConfig
@@ -42,12 +48,14 @@ from src.core.services import BotServices
 from src.core.resilience.retry import with_retry
 from src.core.resilience.circuit_breaker import with_circuit_breaker, ServiceUnavailableError
 from src.core.resilience.recovery import SessionRecovery, StateRecovery
+from src.core.session_commands import SessionCommands
 from src.services.database import DatabaseService
 from src.services.upload import FileUploadService
 from src.services.bot_api_uploader import BotAPIUploader
 from src.services.telethon_uploader import TelethonUploader
 from src.services.instagram_downloader import InstagramDownloader
 from src.services.progress import ProgressTracker
+from src.services.session_storage import SessionStorageService
 
 # Global constants for optimization
 CONTENT_ICONS = {
@@ -183,7 +191,7 @@ class ContentDetector:
         
         return url
 
-class EnhancedTelegramBot:
+class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
     """
     Enhanced Telegram bot with optimized service architecture for Instagram content.
     
@@ -192,10 +200,13 @@ class EnhancedTelegramBot:
     - Message handling and content detection
     - File download and upload operations
     - Database logging and cleanup
+    - Session management with cookie file support
+    - Session management with cookies.txt support
     
     Attributes:
         config (BotConfig): Bot configuration including API keys and settings
         services (BotServices): Service container for all bot services
+        session_storage (SessionStorageService): Manages Instagram session storage
         detector (ContentDetector): Instagram URL detection and parsing
         _cache (Dict[str, Any]): Internal cache for optimization
     """
@@ -266,12 +277,14 @@ class EnhancedTelegramBot:
         try:
             # Initialize components sequentially to avoid race conditions
             await self._initialize_database()
+            
+            # Initialize Instagram after database is ready since it needs the database
+            self._initialize_instagram()  # This one's sync as it just sets up instances
+            self.services.instagram_service = self.instagram_downloader
+            
+            # Initialize remaining components
             await self._initialize_telegram()
             await self._initialize_uploaders()
-            self._initialize_instagram()  # This one's sync as it just sets up instances
-            
-            # Set up instagram service in BotServices
-            self.services.instagram_service = self.instagram_downloader
             
             # Resume any interrupted downloads
             try:
@@ -294,9 +307,22 @@ class EnhancedTelegramBot:
     def _initialize_instagram(self) -> None:
         """Initialize Instagram downloader and cleanup service."""
         downloads_path = self.config.downloads_path
+        
+        # Use gallery-dl-cookies.txt as cookie source
+        cookies_file = pathlib.Path('gallery-dl-cookies.txt')
+        if not cookies_file.exists():
+            raise ValueError("gallery-dl-cookies.txt file not found. Please ensure it exists in the project root.")
+            
         self.instagram_downloader = InstagramDownloader(
             self.config.instagram,
-            downloads_path=downloads_path
+            downloads_path=downloads_path,
+            cookies_file=cookies_file  # Pass Path object directly
+        )
+        
+        # Initialize session storage service
+        self.session_storage = SessionStorageService(
+            self.services.database_service,
+            downloads_path
         )
         
         # Initialize cleanup service
@@ -339,7 +365,25 @@ class EnhancedTelegramBot:
             self.config.telegram.connection_timeout
         ).build()
         
-        self._setup_handlers()
+        # Register command handlers
+        self.bot_app.add_handler(CommandHandler("start", self.handle_start))
+        self.bot_app.add_handler(CommandHandler("help", self.handle_help))
+        self.bot_app.add_handler(CommandHandler("stats", self.handle_stats))
+        
+        # Session management handlers with file handling
+        self.bot_app.add_handler(MessageHandler(
+            filters.COMMAND & filters.Regex(r'^/session_upload$') & filters.Document.Category("text"),
+            self.handle_session_upload
+        ))
+        self.bot_app.add_handler(MessageHandler(
+            filters.COMMAND & filters.Regex(r'^/session_upload$') & ~filters.Document.Category("text"),
+            self.handle_session_upload_no_file
+        ))
+        self.bot_app.add_handler(CommandHandler("session_list", self.handle_session_list))
+        self.bot_app.add_handler(CallbackQueryHandler(self.handle_session_button, pattern=r'^(activate|delete)_session_\d+$'))
+        
+        # URL handling
+        self.bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
         # Initialize Telethon with connection pooling
         self.telethon_client = TelegramClient(
@@ -581,6 +625,8 @@ class EnhancedTelegramBot:
     async def _process_download(self, update: Update, url: str, content_type: str = None, 
                               identifier: str = None, secondary: str = None) -> None:
         """Enhanced download processing with content type awareness and resilience."""
+        if not update.effective_user:
+            return
         status_message = None
         try:
             # Auto-detect if not provided
@@ -626,9 +672,27 @@ class EnhancedTelegramBot:
                 
             await self._safe_edit_message(status_message, msg_text)
             
+            # Get active session for the user
+            session = await self.session_storage.get_active_session(update.effective_user.id)
+            if not session:
+                await status_message.edit_text(
+                    "❌ No active Instagram session found.\n"
+                    "Please use /session_upload to upload a cookies.txt file "
+                    "or ensure you're logged into Instagram in Firefox."
+                )
+                return
+
             try:
-                # Download content using unified method with session recovery
-                downloaded_files = await self.instagram_downloader.download_content(url)
+                # Initialize downloader with session
+                downloader = InstagramDownloader(
+                    self.config.instagram,
+                    Path(self.config.downloads_path),
+                    cookies_file=Path(session['cookies_file_path']) if session['cookies_file_path'] else None
+                )
+                
+                # Download content
+                downloaded_files = await downloader.download_content(url)
+                
             except Exception as e:
                 # Try session recovery if download fails
                 logger.warning("Download failed, attempting session recovery", error=str(e))
@@ -924,6 +988,98 @@ class EnhancedTelegramBot:
         await self._process_download(update, normalized_url, content_type, identifier, secondary)
 
 
+
+    async def handle_session_upload_no_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /session_upload command when no file is attached."""
+        await update.message.reply_text(
+            "📤 **Upload Instagram Cookie File**\n\n"
+            "Please send the /session_upload command with your `cookies.txt` file attached.\n\n"
+            "🔍 **Instructions:**\n"
+            "1. Use a cookie exporter extension to save Instagram cookies\n"
+            "2. Export in Netscape format as 'cookies.txt'\n"
+            "3. Send /session_upload with the file attached\n\n"
+            "⚠️ File must be in Netscape cookie format and contain Instagram cookies.",
+            parse_mode='Markdown'
+        )
+
+    async def handle_session_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /session_upload command with attached cookie file."""
+        user = update.effective_user
+        
+        if not update.message.document:
+            await self.handle_session_upload_no_file(update, context)
+            return
+
+        # Send initial status
+        status_message = await update.message.reply_text(
+            "⏳ Downloading and validating cookie file..."
+        )
+
+        try:
+            # Download the file
+            file = await context.bot.get_file(update.message.document.file_id)
+            temp_cookie_file = Path('temp_cookies.txt')
+            await file.download_to_drive(temp_cookie_file)
+
+            try:
+                # Load and validate the cookies
+                await self._safe_edit_message(status_message, "🔍 Validating cookies...")
+                self.instagram_downloader.session_manager._load_cookies()
+
+                # Try an Instagram API call to verify the session
+                is_valid, message = await self.instagram_downloader.session_manager._test_session()
+                
+                if not is_valid:
+                    await self._safe_edit_message(
+                        status_message,
+                        f"❌ Invalid cookies: {message}\n\n"
+                        "Please ensure you're logged into Instagram and try exporting cookies again."
+                    )
+                    return
+
+                # Store the session in the database
+                username = "instagram_user"  # TODO: Extract from cookies
+                session_id = await self.services.database_service.store_instagram_session(
+                    user.id,
+                    username,
+                    'cookie_file',
+                    'valid',
+                    str(temp_cookie_file),
+                    True  # Make this the active session
+                )
+
+                # Log session validation
+                await self.services.database_service.log_session_validation(
+                    session_id, True
+                )
+
+                await self._safe_edit_message(
+                    status_message,
+                    "✅ Session validated and stored successfully!\n\n"
+                    "You can now use this bot to download Instagram content."
+                )
+
+            except Exception as e:
+                error_msg = str(e)
+                await self._safe_edit_message(
+                    status_message,
+                    f"❌ Session validation failed: {error_msg}\n\n"
+                    "Please ensure your cookies are valid and try again."
+                )
+                logger.error(f"Session validation failed for user {user.id}: {error_msg}")
+
+        except Exception as e:
+            error_msg = str(e)
+            await self._safe_edit_message(
+                status_message,
+                f"❌ Failed to process cookie file: {error_msg}"
+            )
+            logger.error(f"Cookie file processing failed for user {user.id}: {error_msg}")
+        
+        finally:
+            # Clean up temporary file
+            if temp_cookie_file.exists():
+                temp_cookie_file.unlink()
 
     async def shutdown(self) -> None:
         """Shutdown the bot with optimized cleanup."""
