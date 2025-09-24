@@ -20,9 +20,12 @@ Version: 2.0.0
 
 # Standard library imports
 import asyncio
+import json
 import logging
 import pathlib
 import re
+import time
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -55,7 +58,7 @@ from src.services.bot_api_uploader import BotAPIUploader
 from src.services.telethon_uploader import TelethonUploader
 from src.services.instagram_downloader import InstagramDownloader
 from src.services.progress import ProgressTracker
-from src.services.session_storage import SessionStorageService
+from src.services.session_storage import SessionStorageService, SessionStorageError
 
 # Global constants for optimization
 CONTENT_ICONS = {
@@ -218,11 +221,13 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         Args:
             config (BotConfig): Bot configuration instance containing all settings
         """
+        super().__init__()
         self.config = config
         self.services = BotServices.create(config)
         self.detector = ContentDetector()
         self._setup_directories()
         self._cache: Dict[str, Any] = {}
+        self._user_states: Dict[int, Dict[str, Any]] = {}
         
         # Initialize recovery services
         self.session_recovery = SessionRecovery(self.services)
@@ -281,6 +286,7 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             # Initialize Instagram after database is ready since it needs the database
             self._initialize_instagram()  # This one's sync as it just sets up instances
             self.services.instagram_service = self.instagram_downloader
+            self.services.session_storage = self.session_storage
             
             # Initialize remaining components
             await self._initialize_telegram()
@@ -308,10 +314,10 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         """Initialize Instagram downloader and cleanup service."""
         downloads_path = self.config.downloads_path
         
-        # Use gallery-dl-cookies.txt as cookie source
-        cookies_file = pathlib.Path('gallery-dl-cookies.txt')
+        # Use gallery-dl-cookies.txt from the project root as cookie source
+        cookies_file = pathlib.Path(__file__).parent.parent / 'gallery-dl-cookies.txt'
         if not cookies_file.exists():
-            raise ValueError("gallery-dl-cookies.txt file not found. Please ensure it exists in the project root.")
+            raise ValueError(f"gallery-dl-cookies.txt file not found at {cookies_file}. Please ensure it exists in the project root.")
             
         self.instagram_downloader = InstagramDownloader(
             self.config.instagram,
@@ -370,17 +376,24 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         self.bot_app.add_handler(CommandHandler("help", self.handle_help))
         self.bot_app.add_handler(CommandHandler("stats", self.handle_stats))
         
-        # Session management handlers with file handling
-        self.bot_app.add_handler(MessageHandler(
-            filters.COMMAND & filters.Regex(r'^/session_upload$') & filters.Document.Category("text"),
-            self.handle_session_upload
+        # Session management handlers
+        # Session upload command handler
+        self.bot_app.add_handler(CommandHandler(
+            "session_upload", 
+            self.handle_session_upload_start
         ))
+        
+        # File upload handler for when waiting for cookies file
         self.bot_app.add_handler(MessageHandler(
-            filters.COMMAND & filters.Regex(r'^/session_upload$') & ~filters.Document.Category("text"),
-            self.handle_session_upload_no_file
+            filters.Document.ALL & ~filters.COMMAND,
+            self.handle_session_file_upload,
+            block=False
         ))
         self.bot_app.add_handler(CommandHandler("session_list", self.handle_session_list))
-        self.bot_app.add_handler(CallbackQueryHandler(self.handle_session_button, pattern=r'^(activate|delete)_session_\d+$'))
+        self.bot_app.add_handler(CallbackQueryHandler(
+            self.handle_session_button, 
+            pattern=r'^(activate|delete)_session_\d+$'
+        ))
         
         # URL handling
         self.bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
@@ -742,6 +755,29 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                 
             await self._safe_edit_message(status_message, final_message)
             
+        except SessionStorageError as se:
+            error_msg = str(se)
+            logger.error("Session error while downloading", url=url, content_type=content_type, error=error_msg)
+            
+            if status_message:
+                content_name = content_type.replace('_', ' ').title() if content_type else 'content'
+                if "Failed to get active session" in error_msg:
+                    await self._safe_edit_message(
+                        status_message,
+                        "❌ No active Instagram session found.\n"
+                        "Please upload a valid session using /session_upload command first."
+                    )
+                else:
+                    await self._safe_edit_message(
+                        status_message,
+                        f"❌ Session error: {error_msg}\n"
+                        "Try uploading a new session using /session_upload"
+                    )
+            
+            await self.services.database_service.log_file_operation(
+                url, 0, 'download', False, f"Session error: {error_msg}"
+            )
+            
         except Exception as e:
             error_msg = str(e)
             logger.error("Error processing download", url=url, content_type=content_type, error=error_msg)
@@ -989,33 +1025,92 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
 
 
 
-    async def handle_session_upload_no_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /session_upload command when no file is attached."""
-        await update.message.reply_text(
+    async def handle_session_upload_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Start the session upload process and wait for file."""
+        if context.user_data.get('waiting_for_cookie_file'):
+            # Already waiting for a file
+            await update.message.reply_text(
+                "⚠️ I'm already waiting for your cookie file.\n"
+                "Please upload it or wait for the current session to timeout.",
+                parse_mode='Markdown'
+            )
+            return
+            
+        # Start waiting for file
+        context.user_data['waiting_for_cookie_file'] = True
+        context.user_data['cookie_upload_expires'] = time.time() + 30
+        
+        # Send instructions
+        status_message = await update.message.reply_text(
             "📤 **Upload Instagram Cookie File**\n\n"
-            "Please send the /session_upload command with your `cookies.txt` file attached.\n\n"
+            "🕒 You have 30 seconds to send your `cookies.txt` file.\n\n"
             "🔍 **Instructions:**\n"
             "1. Use a cookie exporter extension to save Instagram cookies\n"
             "2. Export in Netscape format as 'cookies.txt'\n"
-            "3. Send /session_upload with the file attached\n\n"
-            "⚠️ File must be in Netscape cookie format and contain Instagram cookies.",
+            "3. Upload the file here\n\n"
+            "⚠️ File must be in Netscape cookie format and contain Instagram cookies.\n"
+            "⏳ Waiting for file...",
             parse_mode='Markdown'
         )
+        
+        # Store message ID for timeout handling
+        context.user_data['status_message_id'] = status_message.message_id
+        context.user_data['status_chat_id'] = status_message.chat_id
+        
+        # Schedule timeout
+        async def timeout_handler():
+            await asyncio.sleep(30)
+            try:
+                if context.user_data.get('waiting_for_cookie_file'):
+                    context.user_data.pop('waiting_for_cookie_file', None)
+                    context.user_data.pop('cookie_upload_expires', None)
+                    
+                    # Try to edit the original message
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=context.user_data['status_chat_id'],
+                            message_id=context.user_data['status_message_id'],
+                            text="⌛ Session upload timed out.\nUse /session_upload to try again."
+                        )
+                    except Exception:
+                        pass  # Message might have been deleted or edited
+            except Exception as e:
+                logger.error(f"Error in timeout handler: {e}")
+                
+        asyncio.create_task(timeout_handler())
 
-    async def handle_session_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /session_upload command with attached cookie file."""
+    async def handle_session_file_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle cookie file upload after /session_upload command."""
         user = update.effective_user
         
-        if not update.message.document:
-            await self.handle_session_upload_no_file(update, context)
+        # Ignore if we're not waiting for a file from this user
+        if not context.user_data.get('waiting_for_cookie_file'):
             return
-
+        
+        # Check if upload window expired
+        if time.time() > context.user_data.get('cookie_upload_expires', 0):
+            # Clean up user data
+            context.user_data.pop('waiting_for_cookie_file', None)
+            context.user_data.pop('cookie_upload_expires', None)
+            
+            await update.message.reply_text(
+                "⌛ Upload window expired. Please use /session_upload to try again."
+            )
+            return
+            
+        # Clear waiting flags
         # Send initial status
         status_message = await update.message.reply_text(
             "⏳ Downloading and validating cookie file..."
         )
 
         try:
+            # Clear waiting flags after status message to allow edits if needed
+            context.user_data.pop('waiting_for_cookie_file', None)
+            context.user_data.pop('cookie_upload_expires', None)
+            context.user_data.pop('status_message_id', None)
+            context.user_data.pop('status_chat_id', None)
+
             # Download the file
             file = await context.bot.get_file(update.message.document.file_id)
             temp_cookie_file = Path('temp_cookies.txt')
@@ -1036,16 +1131,37 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                         "Please ensure you're logged into Instagram and try exporting cookies again."
                     )
                     return
+                    
+                # Delete any existing sessions for this user
+                await self._safe_edit_message(status_message, "⏳ Cleaning up old sessions...")
+
+                # Check if user already has a session
+                existing_sessions = await self.services.database_service.get_all_sessions(user.id)
+                if existing_sessions:
+                    await self._safe_edit_message(
+                        status_message,
+                        "⚠️ You already have an active session.\n"
+                        "Please use /session_list to manage your existing sessions first."
+                    )
+                    return
 
                 # Store the session in the database
                 username = "instagram_user"  # TODO: Extract from cookies
-                session_id = await self.services.database_service.store_instagram_session(
-                    user.id,
-                    username,
-                    'cookie_file',
-                    'valid',
-                    str(temp_cookie_file),
-                    True  # Make this the active session
+                
+                # Create JSON-serializable session data
+                session_data = {
+                    "status": "valid",
+                    "last_checked": datetime.now().isoformat(),
+                    "cookie_file": str(temp_cookie_file)
+                }
+                
+                session_id = await self.services.session_storage.store_session(
+                    user_id=user.id,
+                    username=username,
+                    session_type='cookie_file',
+                    session_data=session_data,  # SessionStorageService will handle JSON conversion
+                    cookies_file_path=temp_cookie_file,
+                    make_active=True
                 )
 
                 # Log session validation

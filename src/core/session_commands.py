@@ -2,6 +2,7 @@
 
 from typing import Optional, List
 import logging
+import json
 from pathlib import Path
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
@@ -41,7 +42,7 @@ class SessionCommands:
                     raise ValueError("Missing required cookies (sessionid and csrftoken)")
                     
                 # Store the session
-                await self.session_storage.store_session(
+                await self.services.session_storage.store_session(
                     user_id=update.effective_user.id,
                     username=session.get('ds_user_id', 'unknown'),
                     session_type='cookies_file',
@@ -75,7 +76,7 @@ class SessionCommands:
             
         try:
             # Get all sessions for the user
-            sessions = await self.session_storage.get_all_sessions(update.effective_user.id)
+            sessions = await self.services.session_storage.get_all_sessions(update.effective_user.id)
             
             if not sessions:
                 await update.message.reply_text(
@@ -90,13 +91,25 @@ class SessionCommands:
                 status = "✅ Active" if session['is_active'] else "⏸️ Inactive"
                 type_icon = "📁" if session['session_type'] == 'cookies_file' else "🦊"
                 expires = session['expires_at']
+                last_validated = session.get('last_validated')
+
+                # Format dates if they are strings
+                if isinstance(expires, str):
+                    expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
+                if isinstance(last_validated, str):
+                    last_validated = datetime.fromisoformat(last_validated.replace('Z', '+00:00'))
+
                 expires_text = f"Expires: {expires:%Y-%m-%d}" if expires else "No expiration"
+                last_validated_text = (
+                    f"Last validated: {last_validated:%Y-%m-%d %H:%M}" 
+                    if last_validated else "Never validated"
+                )
                 
                 response.append(
                     f"\n{type_icon} Session #{session['id']}\n"
                     f"Status: {status}\n"
                     f"Type: {session['session_type']}\n"
-                    f"Last validated: {session['last_validated']:%Y-%m-%d %H:%M}\n"
+                    f"{last_validated_text}\n"
                     f"{expires_text}"
                 )
                 

@@ -4,7 +4,6 @@ import os
 import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-import browser_cookie3
 import requests
 from datetime import datetime, timedelta
 
@@ -18,7 +17,7 @@ class InstagramSessionError(Exception):
         self.is_rate_limit = is_rate_limit
 
 class InstagramSessionManager:
-    """Manages Instagram sessions using Firefox or Netscape-format cookies."""
+    """Manages Instagram sessions using Netscape-format cookies."""
 
     REQUIRED_COOKIES = ['sessionid', 'csrftoken']
     COOKIE_DOMAIN = '.instagram.com'
@@ -41,7 +40,7 @@ class InstagramSessionManager:
         self._load_cookies()
 
     def _load_cookies(self, max_retries: int = 3, initial_delay: float = 1.0) -> None:
-        """Load cookies from Netscape file (if provided) or Firefox and validate them with retries."""
+        """Load cookies from Netscape file and validate them with retries."""
         last_error = None
         delay = initial_delay
 
@@ -50,39 +49,29 @@ class InstagramSessionManager:
                 if attempt > 0:
                     logger.info(f"Retrying cookie load (attempt {attempt}/{max_retries})")
 
-                if self.cookies_file and self.cookies_file.exists():
-                    logger.info(f"Loading Instagram cookies from Netscape-format file: {self.cookies_file}")
-                    cookies = self._load_netscape_cookies(self.cookies_file)
-                else:
-                    logger.info("Loading Instagram cookies from Firefox...")
-                    cookies = browser_cookie3.firefox()
+                if not self.cookies_file or not self.cookies_file.exists():
+                    raise InstagramSessionError("No cookies.txt file found. Please use /session_upload command to provide Instagram cookies.")
+
+                logger.info(f"Loading Instagram cookies from Netscape-format file: {self.cookies_file}")
+                cookies = self._load_netscape_cookies(self.cookies_file)
 
                 # Clear existing cookies
                 old_cookies = self._session_cookies.copy()
                 self._session_cookies.clear()
 
-                # Load new cookies
-                if isinstance(cookies, list):
-                    # Netscape-format: list of dicts
-                    for cookie in cookies:
-                        if cookie['domain'].endswith(self.COOKIE_DOMAIN):
-                            masked_value = f"{str(cookie['value'])[:10]}..."
-                            logger.debug(f"Found cookie: {cookie['name']} = {masked_value}")
-                            self._session_cookies[cookie['name']] = cookie['value']
-                else:
-                    # browser_cookie3: CookieJar
-                    for cookie in cookies:
-                        if cookie.domain == self.COOKIE_DOMAIN:
-                            masked_value = f"{str(cookie.value)[:10]}..."
-                            logger.debug(f"Found cookie: {cookie.name} = {masked_value}")
-                            self._session_cookies[cookie.name] = cookie.value
+                # Load new cookies from Netscape format
+                for cookie in cookies:
+                    if cookie['domain'].endswith(self.COOKIE_DOMAIN):
+                        masked_value = f"{str(cookie['value'])[:10]}..."
+                        logger.debug(f"Found cookie: {cookie['name']} = {masked_value}")
+                        self._session_cookies[cookie['name']] = cookie['value']
 
                 # Check if cookies actually changed
                 if self._session_cookies != old_cookies:
                     self._last_cookie_refresh = datetime.now()
                     logger.info("Cookies were refreshed")
                 elif not self._session_cookies:
-                    raise InstagramSessionError("No Instagram cookies found. Please ensure you're logged in or provide a valid cookies.txt file.")
+                    raise InstagramSessionError("No Instagram cookies found in cookies.txt file.")
 
                 # Verify and log found cookies
                 self._validate_cookies()
@@ -90,9 +79,6 @@ class InstagramSessionManager:
                 logger.info("Successfully loaded Instagram cookies")
                 return  # Success!
 
-            except (browser_cookie3.BrowserCookieError, PermissionError) as e:
-                last_error = f"Browser access error: {str(e)}. Please ensure Firefox is not running in private mode."
-                logger.warning(f"Cookie load attempt {attempt + 1} failed: {last_error}")
             except InstagramSessionError as e:
                 if e.is_rate_limit:
                     raise  # Don't retry rate limit errors

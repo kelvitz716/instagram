@@ -349,6 +349,12 @@ class DatabaseService:
         """Store a new Instagram session."""
         conn = self._pool.acquire()
         try:
+            # First, deactivate and remove any existing sessions of the same type for this user
+            conn.execute("""
+                DELETE FROM instagram_sessions 
+                WHERE user_id = ? AND session_type = ? AND cookies_file_path = ?
+            """, (user_id, session_type, cookies_file_path))
+            
             if make_active:
                 # Deactivate other sessions for this user
                 conn.execute(

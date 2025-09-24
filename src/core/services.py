@@ -11,6 +11,7 @@ class BotServices:
     database_service: Optional["DatabaseService"] = None
     progress_tracker: Optional["ProgressTracker"] = None
     rate_limiter: Optional["TelegramRateLimiter"] = None
+    session_storage: Optional["SessionStorageService"] = None
     
     @classmethod
     def create(cls, config: BotConfig) -> "BotServices":
@@ -21,7 +22,8 @@ class BotServices:
             instagram_service=None,  # Will be initialized later
             database_service=None,  # Will be initialized later
             progress_tracker=None,  # Will be initialized later
-            rate_limiter=None  # Will be initialized later
+            rate_limiter=None,  # Will be initialized later
+            session_storage=None  # Will be initialized later
         )
     
     async def initialize(self):

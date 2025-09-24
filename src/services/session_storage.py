@@ -53,12 +53,13 @@ class SessionStorageService:
                 cookies_file_path = str(stored_path)
             
             # Store session in database
+            cookies_file_path_str = str(cookies_file_path) if cookies_file_path else None
             session_id = await self.db.store_instagram_session(
                 user_id=user_id,
                 username=username,
                 session_type=session_type,
                 session_data=json.dumps(session_data),
-                cookies_file_path=cookies_file_path,
+                cookies_file_path=cookies_file_path_str,
                 make_active=make_active,
                 expires_at=expires_at
             )
@@ -95,7 +96,11 @@ class SessionStorageService:
         try:
             session = await self.db.get_active_session(user_id)
             if session:
-                session['session_data'] = json.loads(session['session_data'])
+                try:
+                    session['session_data'] = json.loads(session['session_data'])
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to decode session data: {e}")
+                    session['session_data'] = {}
             return session
         except Exception as e:
             logger.error(f"Failed to get active session: {e}")
@@ -106,7 +111,12 @@ class SessionStorageService:
         try:
             sessions = await self.db.get_all_sessions(user_id)
             for session in sessions:
-                session['session_data'] = json.loads(session['session_data'])
+                try:
+                    if isinstance(session['session_data'], str):
+                        session['session_data'] = json.loads(session['session_data'])
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.error(f"Failed to decode session data: {e}")
+                    session['session_data'] = {}
             return sessions
         except Exception as e:
             logger.error(f"Failed to get sessions: {e}")

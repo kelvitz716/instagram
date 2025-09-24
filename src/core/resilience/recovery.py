@@ -42,7 +42,7 @@ class SessionRecovery:
             
             # First try refreshing the session
             try:
-                await self.services.instagram_downloader.refresh_session()
+                await self.services.instagram_service.refresh_session()
                 logger.info("Instagram session refreshed successfully")
                 return True
                 
@@ -54,8 +54,8 @@ class SessionRecovery:
                 
             # If refresh fails, try complete relogin
             await asyncio.sleep(60)  # Wait before retry
-            await self.services.instagram_downloader.login()
-            logger.info("Instagram relogin successful")
+            await self.services.instagram_service.login()
+            logger.info("Instagram session restored through relogin")
             return True
             
         except Exception as e:
@@ -130,7 +130,7 @@ class StateRecovery:
                 return True
                 
             # Resume download
-            await self.services.instagram_downloader.download_post(
+            await self.services.instagram_service.download_post(
                 url=state['url'],
                 status_message=None  # Create new status message
             )

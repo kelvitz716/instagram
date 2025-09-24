@@ -48,6 +48,38 @@ class InstagramDownloader:
             raise
 
         # Path to executables
+        self.gallery_dl_path = Path("/workspaces/instagram/.venv/bin/gallery-dl")
+        
+    async def refresh_session(self) -> None:
+        """Attempt to refresh the Instagram session.
+        
+        Raises:
+            InstagramSessionError: If session refresh fails
+        """
+        # Refresh cookies
+        self.session_manager._load_cookies()
+        
+        # Test session after refresh
+        is_valid, message = await self.session_manager._test_session()
+        if not is_valid:
+            raise InstagramSessionError(f"Session refresh failed: {message}")
+            
+    async def login(self) -> None:
+        """Attempt to log in to Instagram with the current cookies.
+        
+        Raises:
+            InstagramSessionError: If login fails
+        """
+        try:
+            # Reload cookies first
+            self.session_manager._load_cookies()
+            
+            # Test if session is valid
+            is_valid, message = await self.session_manager._test_session()
+            if not is_valid:
+                raise InstagramSessionError(f"Login failed: {message}")
+        except Exception as e:
+            raise InstagramSessionError(f"Login failed: {str(e)}")
         self.gallery_dl_path = Path("/home/kelvitz/Github/instagram/myenv/bin/gallery-dl")
         self.yt_dlp_path = Path("/home/kelvitz/Github/instagram/myenv/bin/yt-dlp")
         
@@ -214,7 +246,7 @@ class InstagramDownloader:
             # Prepare gallery-dl command with more verbose output
             cmd = [
                 str(self.gallery_dl_path),
-                '--cookies-from-browser', 'firefox',
+                '--cookies', str(self.session_manager.cookies_file),
                 '--write-metadata',
                 '--verbose',  # Add verbose output for better debugging
                 '-D', str(output_path),
