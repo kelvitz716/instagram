@@ -316,17 +316,18 @@ class DatabaseService:
                 return dict(stats)
                 
             # Use a single query for better performance, with proper status checks
+            # Using COALESCE to ensure we don't get null values
             cursor = conn.execute("""
                 SELECT 
-                    (SELECT COUNT(*) FROM downloads) as total_downloads,
-                    (SELECT COUNT(*) FROM downloads WHERE status = 'success') as successful_downloads,
-                    (SELECT COUNT(*) FROM downloads WHERE status = 'failed') as failed_downloads,
-                    (SELECT COUNT(*) FROM uploads) as total_uploads,
-                    (SELECT COUNT(*) FROM uploads WHERE status = 'success') as successful_uploads,
-                    (SELECT COUNT(*) FROM uploads WHERE status = 'failed') as failed_uploads,
-                    (SELECT COUNT(DISTINCT file_path) FROM file_operations WHERE operation_type = 'download') as total_files_downloaded,
-                    (SELECT COUNT(DISTINCT file_path) FROM file_operations WHERE operation_type = 'upload' AND success = 1) as successful_file_uploads,
-                    (SELECT SUM(file_size) FROM file_operations WHERE operation_type = 'download') as total_bytes_downloaded
+                    COALESCE((SELECT COUNT(*) FROM downloads), 0) as total_downloads,
+                    COALESCE((SELECT COUNT(*) FROM downloads WHERE status = 'success'), 0) as successful_downloads,
+                    COALESCE((SELECT COUNT(*) FROM downloads WHERE status = 'failed'), 0) as failed_downloads,
+                    COALESCE((SELECT COUNT(*) FROM uploads), 0) as total_uploads,
+                    COALESCE((SELECT COUNT(*) FROM uploads WHERE status = 'success'), 0) as successful_uploads,
+                    COALESCE((SELECT COUNT(*) FROM uploads WHERE status = 'failed'), 0) as failed_uploads,
+                    COALESCE((SELECT COUNT(DISTINCT file_path) FROM file_operations WHERE operation_type = 'download'), 0) as total_files_downloaded,
+                    COALESCE((SELECT COUNT(DISTINCT file_path) FROM file_operations WHERE operation_type = 'upload' AND success = 1), 0) as successful_file_uploads,
+                    COALESCE((SELECT SUM(file_size) FROM file_operations WHERE operation_type = 'download'), 0) as total_bytes_downloaded
             """)
             row = cursor.fetchone()
             if row:
@@ -447,6 +448,50 @@ class DatabaseService:
                 self._prepared_statements['cleanup_expired_sessions']
             )
             return cursor.rowcount
+        finally:
+            self._pool.release(conn)
+            
+    async def get_content_type_stats(self) -> Dict[str, int]:
+        """Get download statistics broken down by content type.
+        
+        Returns:
+            Dict[str, int]: A dictionary mapping content types to their download counts
+        """
+        # Check cache first
+        current_time = datetime.now().timestamp()
+        if 'content_stats' in self._stats_cache:
+            stats, timestamp = self._stats_cache['content_stats']
+            if current_time - timestamp < self._cache_ttl:
+                return stats
+                
+        conn = self._pool.acquire()
+        try:
+            # Query the downloads table and extract content types from URLs
+            cursor = conn.execute("""
+                SELECT 
+                    CASE
+                        WHEN url LIKE '%instagram.com/p/%' THEN 'post'
+                        WHEN url LIKE '%instagram.com/reel/%' THEN 'reel'
+                        WHEN url LIKE '%instagram.com/stories/%' THEN 'story'
+                        WHEN url LIKE '%instagram.com/stories/highlights/%' THEN 'highlight'
+                        WHEN url LIKE '%instagram.com/tv/%' THEN 'tv'
+                        ELSE 'other'
+                    END as content_type,
+                    COUNT(*) as count
+                FROM downloads
+                WHERE status = 'success'
+                GROUP BY content_type
+                ORDER BY count DESC
+            """)
+            
+            stats = {}
+            for row in cursor.fetchall():
+                stats[row[0]] = row[1]
+                
+            # Cache the results
+            self._stats_cache['content_stats'] = (stats, current_time)
+            
+            return stats
         finally:
             self._pool.release(conn)
     

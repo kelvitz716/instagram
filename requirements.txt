@@ -4,6 +4,7 @@ structlog>=21.1.0
 rich>=10.9.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
+python-telegram-bot[job-queue]
 
 # Telegram
 python-telegram-bot>=20.0
