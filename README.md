@@ -18,6 +18,8 @@ A Telegram bot that downloads content from Instagram posts, reels, and carousels
 - Rate limiting and flood control
 - Configurable file watching
 - Enhanced session management
+- Docker support with health checks
+- Easy deployment scripts
 
 Note: Stories and highlights are not supported as they require Instagram's private API access.
 
@@ -27,7 +29,51 @@ Note: Stories and highlights are not supported as they require Instagram's priva
 - Firefox browser (for Instagram authentication)
 - Access to Telegram API (bot token, API ID, and API hash)
 
-## Installation
+## Quick Start with Docker (Recommended)
+
+1. Clone the repository:
+```bash
+git clone https://github.com/kelvitz716/instagram.git
+cd instagram
+```
+
+2. Set up your configuration:
+```bash
+# Copy example environment file
+cp example.env .env
+
+# Edit .env with your settings
+nano .env  # or use any text editor
+```
+
+3. Add your Instagram cookies:
+- Create or copy your `gallery-dl-cookies.txt` file into the project directory
+
+4. Run the setup script:
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+That's it! The bot should now be running in a Docker container.
+
+### Docker Commands
+
+- View logs: `docker-compose logs -f`
+- Stop the bot: `docker-compose down`
+- Restart the bot: `docker-compose restart`
+- Check status: `docker-compose ps`
+
+### Docker Volumes
+
+The bot uses Docker volumes to persist data:
+- `./downloads`: Stores downloaded media files
+- `gallery-dl-cookies.txt`: Instagram authentication cookies
+- `.env`: Configuration file
+
+## Manual Installation (Alternative)
+
+If you prefer to run without Docker, follow these steps:
 
 1. Clone the repository:
 ```bash
@@ -123,26 +169,32 @@ Note: Simply paste the URL of any Instagram post, carousel, or reel to download 
 - Memory usage optimization
 - Connection pooling
 
+## Docker Health Checks
+
+The Docker container includes health checks that:
+- Verify the bot's connection to Telegram
+- Monitor the bot's operational status
+- Automatically restart if issues are detected
+
+Health check status can be viewed with:
+```bash
+docker inspect instagram-telegram-bot --format='{{.State.Health.Status}}'
+```
+
 ## Architecture
 
 The bot follows a service-based architecture:
 
 ```
 instagram-bot/
-├── src/
-│   ├── bot.py              # Main bot implementation
-│   ├── core/               # Core functionality
-│   │   ├── config.py       # Configuration classes
-│   │   ├── load_config.py  # Environment loading
-│   │   └── ...
-│   ├── services/          # Service modules
-│   │   ├── database.py    # Database operations
-│   │   ├── upload.py      # File upload handling
-│   │   └── ...
-│   └── utils/            # Utility functions
-├── tests/               # Test files
-├── bot.py              # Entry point
-└── requirements.txt    # Dependencies
+├── src/                 # Source code
+├── tests/              # Test files
+├── Dockerfile          # Docker configuration
+├── docker-compose.yml  # Docker Compose configuration
+├── setup.sh           # Setup script
+├── healthcheck.py     # Container health check
+├── bot.py             # Entry point
+└── requirements.txt   # Dependencies
 ```
 
 ## Configuration
@@ -155,6 +207,36 @@ See `example.env` for all available configuration options, including:
 - File watcher options
 - Logging preferences
 - Performance tuning
+
+## Troubleshooting
+
+### Docker Issues
+
+1. Container won't start:
+   - Check logs: `docker-compose logs`
+   - Verify .env configuration
+   - Ensure gallery-dl-cookies.txt exists
+
+2. Health check failing:
+   - Verify bot token is correct
+   - Check Telegram API accessibility
+   - Review logs for specific errors
+
+3. Permission issues:
+   - Ensure proper ownership of mounted volumes
+   - Check file permissions in host directory
+
+### Common Problems
+
+1. Instagram authentication:
+   - Verify cookie file is properly formatted
+   - Check cookie file permissions
+   - Ensure cookies are not expired
+
+2. Network issues:
+   - Check container networking
+   - Verify proxy settings if used
+   - Ensure required ports are accessible
 
 ## License
 
