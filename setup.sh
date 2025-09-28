@@ -40,8 +40,11 @@ fi
 
 # Create all required directories with proper permissions
 echo -e "${YELLOW}Creating required directories...${NC}"
-mkdir -p downloads data sessions uploads temp telegram
-chmod 775 downloads data sessions uploads temp telegram
+
+# Create directories
+mkdir -p downloads data/db sessions uploads temp telegram
+chmod -R 777 data  # Ensure database directory is fully writable
+chmod 775 downloads sessions uploads temp telegram
 
 # Set up proper ownership (try to match container's botuser)
 if getent group botuser > /dev/null 2>&1; then
@@ -58,12 +61,17 @@ else
     BOTUSER=$USER
 fi
 
+# Touch the database file to ensure it exists with proper permissions
+touch data/bot_data.db
+chmod 666 data/bot_data.db
+
 # Attempt to set ownership, but don't fail if it doesn't work (might need sudo)
-chown $BOTUSER:$BOTGROUP downloads data sessions uploads temp telegram 2>/dev/null || true
+chown -R $BOTUSER:$BOTGROUP downloads data sessions uploads temp telegram 2>/dev/null || true
 
 echo -e "${GREEN}Created directory structure:${NC}"
 echo -e "  - downloads/: For downloaded media"
 echo -e "  - data/: For database and persistent data"
+echo -e "    - data/db/: For SQLite database"
 echo -e "  - sessions/: For Telegram session files"
 echo -e "  - uploads/: For processed files ready to upload"
 echo -e "  - temp/: For temporary files"

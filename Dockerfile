@@ -22,6 +22,7 @@ COPY . .
 RUN mkdir -p /app/downloads /app/data /app/sessions /app/uploads /app/temp && \
     chown -R 1000:1000 /app && \
     chmod -R 775 /app && \
+    chmod -R 777 /app/data && \  # Ensure database directory is fully writable
     chmod g+s /app/data /app/sessions  # Ensure new files inherit group permissions
 
 # Set up runtime user
