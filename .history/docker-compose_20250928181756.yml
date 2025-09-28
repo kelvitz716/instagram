@@ -7,7 +7,7 @@ services:
     volumes:
       - ./downloads:/app/downloads
       - ./data:/app/data:rw
-      - ./sessions:/app/downloads/sessions:rw
+      - ./sessions:/app/sessions
       - ./uploads:/app/uploads
       - ./temp:/app/temp
       - ./telegram:/app/telegram
