@@ -331,9 +331,40 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             downloads_path
         )
         
-        # Initialize cleanup service
+        # Initialize cleanup service with 2-day retention
         from src.services.cleanup import CleanupService
-        self.cleanup_service = CleanupService(downloads_path)
+        self.cleanup_service = CleanupService(downloads_path, max_age_days=2)
+        
+    async def handle_cleanup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /cleanup command for manual media cleanup."""
+        # Send initial status
+        status_message = await update.message.reply_text(
+            "🧹 Starting cleanup of all media files..."
+        )
+        
+        try:
+            # Clean up all media files
+            dirs_removed, bytes_freed = await self.cleanup_service.cleanup_all_media()
+            
+            if dirs_removed > 0:
+                await self._safe_edit_message(
+                    status_message,
+                    f"✅ Cleanup complete!\n\n"
+                    f"• Removed {dirs_removed:,} directories\n"
+                    f"• Freed {bytes_freed/1024/1024:.1f} MB of space"
+                )
+            else:
+                await self._safe_edit_message(
+                    status_message,
+                    "✨ No media files to clean up!"
+                )
+                
+        except Exception as e:
+            logger.error(f"Cleanup failed: {e}")
+            await self._safe_edit_message(
+                status_message,
+                f"❌ Error during cleanup: {str(e)}"
+            )
         
     def _extract_urls_from_text(self, text: str) -> List[str]:
         """Extract URLs from text message using pre-compiled pattern."""
@@ -375,6 +406,7 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         self.bot_app.add_handler(CommandHandler("start", self.handle_start))
         self.bot_app.add_handler(CommandHandler("help", self.handle_help))
         self.bot_app.add_handler(CommandHandler("stats", self.handle_stats))
+        self.bot_app.add_handler(CommandHandler("cleanup", self.handle_cleanup))
         
         # Session management handlers
         # Session upload command handler

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class CleanupService:
     """Manages cleanup of old download directories."""
     
-    def __init__(self, downloads_path: str, max_age_days: int = 7):
+    def __init__(self, downloads_path: str, max_age_days: int = 2):
         self.downloads_path = Path(downloads_path)
         self.max_age_days = max_age_days
         
@@ -93,3 +93,36 @@ class CleanupService:
         except Exception as e:
             logger.error(f"Error getting storage stats: {e}")
             return {}
+            
+    async def cleanup_all_media(self) -> tuple[int, int]:
+        """Clean up all media files in the downloads directory.
+        
+        Returns:
+            tuple[int, int]: (number of directories removed, total bytes freed)
+        """
+        if not self.downloads_path.exists():
+            return 0, 0
+            
+        dirs_removed = 0
+        total_bytes_freed = 0
+        
+        try:
+            # Get all items in downloads directory
+            for item in self.downloads_path.iterdir():
+                if not item.is_dir():
+                    continue
+                    
+                try:
+                    size = self.get_directory_size(item)
+                    shutil.rmtree(item)
+                    dirs_removed += 1
+                    total_bytes_freed += size
+                    logger.info(f"Cleaned up directory: {item} (freed {size/1024/1024:.2f} MB)")
+                except Exception as e:
+                    logger.error(f"Error removing directory {item}: {e}")
+                    
+            return dirs_removed, total_bytes_freed
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+            return 0, 0
