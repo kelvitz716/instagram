@@ -825,12 +825,6 @@ class DatabaseService:
                 conn.execute("""
                     UPDATE download_state 
                     SET status = 'failed', error = ?, completed = 1
-                    WHERE url = ? AND status_message_id = ?
-                """, (error, url, status_message_id))
-            else:
-                conn.execute("""
-                    UPDATE download_state 
-                    SET status = 'failed', error = ?, completed = 1
                     WHERE url = ?
                 """, (error, url))
         finally:
@@ -841,4 +835,10 @@ class DatabaseService:
         if self._pool:
             self._pool.close()
             self._pool = None
-            self._stats_cache.clear()
+            self._stats_cache.clear()d = 1
+                    WHERE url = ? AND status_message_id = ?
+                """, (error, url, status_message_id))
+            else:
+                conn.execute("""
+                    UPDATE download_state 
+                    SET status = 'failed', error = ?, complete

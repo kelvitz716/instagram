@@ -1436,34 +1436,34 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                 temp_cookie_file.unlink()
 
     async def shutdown(self) -> None:
-        """Shutdown with proper session cleanup."""
-        try:
-            # Update session usage before shutdown
-            if hasattr(self, 'telegram_session_storage'):
-                session = await self.telegram_session_storage.get_active_session()
-                if session:
-                    await self.telegram_session_storage.update_session_usage(session    ['id'])
-            
-            # Standard shutdown procedure
-            shutdown_tasks = []
-            
-            if self.bot_app:
-                if self.bot_app.updater:
-                    shutdown_tasks.append(self.bot_app.updater.stop())
-                shutdown_tasks.append(self.bot_app.stop())
-                shutdown_tasks.append(self.bot_app.shutdown())
-            
-            if self.telethon_client:
-                shutdown_tasks.append(self.telethon_client.disconnect())
-            
-            if self.services.database_service:
-                shutdown_tasks.append(self.services.database_service.close())
-            
-            await asyncio.gather(*shutdown_tasks)
-            logger.info("Bot shutdown complete with session preservation")
-            
-        except Exception as e:
-            logger.error("Error during shutdown", error=str(e))
+    """Shutdown with proper session cleanup."""
+    try:
+        # Update session usage before shutdown
+        if hasattr(self, 'telegram_session_storage'):
+            session = await self.telegram_session_storage.get_active_session()
+            if session:
+                await self.telegram_session_storage.update_session_usage(session['id'])
+        
+        # Standard shutdown procedure
+        shutdown_tasks = []
+        
+        if self.bot_app:
+            if self.bot_app.updater:
+                shutdown_tasks.append(self.bot_app.updater.stop())
+            shutdown_tasks.append(self.bot_app.stop())
+            shutdown_tasks.append(self.bot_app.shutdown())
+        
+        if self.telethon_client:
+            shutdown_tasks.append(self.telethon_client.disconnect())
+        
+        if self.services.database_service:
+            shutdown_tasks.append(self.services.database_service.close())
+        
+        await asyncio.gather(*shutdown_tasks)
+        logger.info("Bot shutdown complete with session preservation")
+        
+    except Exception as e:
+        logger.error("Error during shutdown", error=str(e))
 
 async def main() -> None:
     """

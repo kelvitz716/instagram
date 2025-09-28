@@ -830,6 +830,21 @@ class DatabaseService:
             else:
                 conn.execute("""
                     UPDATE download_state 
+                    SET status = 'failed', error = ?, complete
+
+    async def mark_download_failed(self, url: str, error: str, status_message_id: Optional[int] = None) -> None:
+        """Mark a download as failed with error information."""
+        conn = self._pool.acquire()
+        try:
+            if status_message_id is not None:
+                conn.execute("""
+                    UPDATE download_state 
+                    SET status = 'failed', error = ?, completed = 1
+                    WHERE url = ? AND status_message_id = ?
+                """, (error, url, status_message_id))
+            else:
+                conn.execute("""
+                    UPDATE download_state 
                     SET status = 'failed', error = ?, completed = 1
                     WHERE url = ?
                 """, (error, url))

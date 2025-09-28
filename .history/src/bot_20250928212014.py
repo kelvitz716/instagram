@@ -288,73 +288,35 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             Exception: If any initialization step fails
         """
         try:
-            # Initialize components sequentially
+            # Initialize components sequentially to avoid race conditions
             await self._initialize_database()
-
-            # Add Telegram session table to database
-            await self._create_telegram_session_table()
-
-            # Initialize Telegram with persistent sessions
-            await self._initialize_telegram()
-
-            # Initialize other services
-            self._initialize_instagram()
+            
+            # Initialize Instagram after database is ready since it needs the database
+            self._initialize_instagram()  # This one's sync as it just sets up instances
             self.services.instagram_service = self.instagram_downloader
             self.services.session_storage = self.session_storage
-
+            
+            # Initialize remaining components
+            await self._initialize_telegram()
             await self._initialize_uploaders()
-
-            # Schedule maintenance tasks
-            await self._schedule_session_maintenance()
-
+            
             # Resume any interrupted downloads
             try:
                 pending_downloads = await self.state_recovery.get_pending_downloads()
                 if pending_downloads:
-                    logger.info(f"Found {len(pending_downloads)} interrupted downloads  to resume")
+                    logger.info(
+                        f"Found {len(pending_downloads)} interrupted downloads to resume"
+                    )
                     for state in pending_downloads:
                         await self.state_recovery.resume_download(state)
             except Exception as e:
                 logger.error("Failed to resume downloads", error=str(e))
-
-            logger.info("Bot initialized successfully with persistent sessions",    version=BOT_VERSION)
-
+            
+            logger.info("Bot initialized successfully", version=BOT_VERSION)
+            
         except Exception as e:
             logger.error("Failed to initialize bot", error=str(e))
             raise
-
-    async def _create_telegram_session_table(self):
-        """Ensure the telegram_sessions table exists."""
-        try:
-            conn = self.services.database_service._pool.acquire()
-            try:
-                await self.services.database_service._create_telegram_sessions_table    (conn)
-            finally:
-                self.services.database_service._pool.release(conn)
-        except Exception as e:
-            logger.error(f"Failed to create telegram_sessions table: {e}")
-            raise
-
-    async def _schedule_session_maintenance(self) -> None:
-        """Schedule periodic maintenance of stored sessions."""
-        async def session_cleanup():
-            try:
-                # Clean up expired Telegram sessions
-                deleted_count = await self.telegram_session_storage.    cleanup_old_sessions()
-                if deleted_count > 0:
-                    logger.info(f"Cleaned up {deleted_count} expired Telegram   sessions")
-
-                # Clean up expired Instagram sessions
-                if hasattr(self, 'session_storage'):
-                    instagram_deleted = await self.session_storage. cleanup_expired_sessions()
-                    if instagram_deleted > 0:
-                        logger.info(f"Cleaned up {instagram_deleted} expired Instagram  sessions")
-
-            except Exception as e:
-                logger.error(f"Session maintenance failed: {e}")
-
-        # Run session cleanup daily
-        self.bot_app.job_queue.run_repeating(session_cleanup, interval=24*60*60)
             
     def _initialize_instagram(self) -> None:
         """Initialize Instagram downloader and cleanup service."""
@@ -441,17 +403,17 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             self.services.database_service,
             self.config.downloads_path / "sessions"
         )
-
+        
         # Try to get existing session first
         stored_session = await self.telegram_session_storage.get_active_session()
-
+        
         if stored_session and await self._validate_existing_session(stored_session):
             logger.info("Using existing Telegram session")
             session_file_path = Path(stored_session['session_file_path'])
         else:
             logger.info("No valid existing session, creating new one")
             session_file_path = await self._create_new_telegram_session()
-
+        
         # Initialize bot application with optimized settings
         self.bot_app = Application.builder().token(
             self.config.telegram.bot_token
@@ -464,14 +426,14 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         ).pool_timeout(
             self.config.telegram.connection_timeout
         ).build()
-
+        
         # Register command handlers
         self.bot_app.add_handler(CommandHandler("start", self.handle_start))
         self.bot_app.add_handler(CommandHandler("help", self.handle_help))
         self.bot_app.add_handler(CommandHandler("stats", self.handle_stats))
         self.bot_app.add_handler(CommandHandler("cleanup", self.handle_cleanup))
         self.bot_app.add_handler(CommandHandler("telegram_status", self.    handle_telegram_session_status))
-
+        
         # Session management handlers for Instagram
         self.bot_app.add_handler(CommandHandler("session_upload", self. handle_session_upload_start))
         self.bot_app.add_handler(MessageHandler(
@@ -484,10 +446,10 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             self.handle_session_button, 
             pattern=r'^(activate|delete)_session_\d+$'
         ))
-
+        
         # URL handling
         self.bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.  handle_message))
-
+    
         # Initialize Telethon with the persistent session
         session_name = str(session_file_path).replace('.session', '')
         self.telethon_client = TelegramClient(
@@ -498,13 +460,13 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             retry_delay=self.config.telegram.flood_control_base_delay,
             auto_reconnect=True
         )
-
+        
         await self.telethon_client.start()
-
+        
         # Update session usage
         if stored_session:
             await self.telegram_session_storage.update_session_usage(stored_session ['id'])
-
+    
     async def _validate_existing_session(self, session: Dict[str, Any]) -> bool:
         """Validate that an existing session is still usable."""
         try:
@@ -515,17 +477,17 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         except Exception as e:
             logger.warning(f"Session validation failed: {e}")
             return False
-
+    
     async def _create_new_telegram_session(self) -> Path:
         """Create a new Telegram session interactively and store it."""
         import tempfile
-
+        
         # Create temporary session for initial login
         with tempfile.NamedTemporaryFile(suffix='.session', delete=False) as temp_file:
             temp_session_path = Path(temp_file.name)
-
+        
         temp_session_name = str(temp_session_path).replace('.session', '')
-
+        
         try:
             # Create temporary client for authentication
             temp_client = TelegramClient(
@@ -533,14 +495,14 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                 self.config.telegram.api_id,
                 self.config.telegram.api_hash
             )
-
+            
             logger.info("Starting Telegram authentication...")
             await temp_client.start()
-
+            
             # Get user info
             me = await temp_client.get_me()
             phone_number = me.phone if me.phone else "unknown"
-
+            
             user_info = {
                 "id": me.id,
                 "first_name": me.first_name,
@@ -548,25 +510,25 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                 "username": me.username,
                 "phone": phone_number
             }
-
+            
             logger.info(f"Authenticated as {me.first_name} ({phone_number})")
-
+            
             # Disconnect temporary client
             await temp_client.disconnect()
-
+            
             # Store the session permanently
             session_id = await self.telegram_session_storage.store_telegram_session(
                 temp_session_path,
                 phone_number,
                 user_info
             )
-
+            
             # Get the stored session path
             stored_path = self.telegram_session_storage.get_session_file_path()
-
+            
             logger.info(f"Telegram session stored successfully with ID {session_id}")
             return stored_path
-
+            
         except Exception as e:
             logger.error(f"Failed to create Telegram session: {e}")
             raise
@@ -578,33 +540,33 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                         temp_path.unlink()
                     except Exception:
                         pass
-
+                    
     async def handle_telegram_session_status(self, update: Update, context:     ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /telegram_status command to show Telegram session status."""
         try:
             session = await self.telegram_session_storage.get_active_session()
-
+            
             if not session:
                 await update.message.reply_text(
                     "❌ No active Telegram session found.\n"
                     "This shouldn't happen if the bot is running properly."
                 )
                 return
-
+            
             session_data = session.get('session_data', {})
             user_info = session_data.get('user_info', {})
-
+            
             response = "📱 **Telegram Session Status**\n\n"
             response += f"✅ **Status:** Active\n"
             response += f"📞 **Phone:** {session['phone_number']}\n"
             response += f"👤 **Name:** {user_info.get('first_name', 'Unknown')}"
-
+            
             if user_info.get('username'):
                 response += f" (@{user_info['username']})"
-
+            
             response += f"\n📅 **Created:** {session['created_at'][:10]}\n"
             response += f"🔄 **Last Used:** {session_data.get('last_used', 'Unknown')   [:19]}\n"
-
+            
             # Check if session file exists
             session_file = Path(session['session_file_path'])
             if session_file.exists():
@@ -612,9 +574,9 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                 response += f"📁 **File Size:** {file_size} bytes\n"
             else:
                 response += "⚠️ **Warning:** Session file not found on disk\n"
-
+            
             await update.message.reply_text(response, parse_mode='Markdown')
-
+            
         except Exception as e:
             logger.error(f"Failed to get session status: {e}")
             await update.message.reply_text(
@@ -1436,31 +1398,28 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                 temp_cookie_file.unlink()
 
     async def shutdown(self) -> None:
-        """Shutdown with proper session cleanup."""
+        """Shutdown the bot with optimized cleanup."""
         try:
-            # Update session usage before shutdown
-            if hasattr(self, 'telegram_session_storage'):
-                session = await self.telegram_session_storage.get_active_session()
-                if session:
-                    await self.telegram_session_storage.update_session_usage(session    ['id'])
-            
-            # Standard shutdown procedure
             shutdown_tasks = []
             
+            # Stop bot application
             if self.bot_app:
                 if self.bot_app.updater:
                     shutdown_tasks.append(self.bot_app.updater.stop())
                 shutdown_tasks.append(self.bot_app.stop())
                 shutdown_tasks.append(self.bot_app.shutdown())
             
+            # Disconnect Telethon
             if self.telethon_client:
                 shutdown_tasks.append(self.telethon_client.disconnect())
             
+            # Close database
             if self.services.database_service:
                 shutdown_tasks.append(self.services.database_service.close())
             
+            # Run all cleanup tasks concurrently
             await asyncio.gather(*shutdown_tasks)
-            logger.info("Bot shutdown complete with session preservation")
+            logger.info("Bot shutdown complete")
             
         except Exception as e:
             logger.error("Error during shutdown", error=str(e))

@@ -124,33 +124,6 @@ class DatabaseService:
         for name, stmt in statements.items():
             self._prepared_statements[name] = stmt
     
-    async def _create_telegram_sessions_table(self, conn: sqlite3.Connection):
-        """Create the telegram_sessions table."""
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS telegram_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_name TEXT NOT NULL,
-                session_file_path TEXT NOT NULL,
-                session_data TEXT NOT NULL,
-                phone_number TEXT NOT NULL,
-                is_active BOOLEAN DEFAULT TRUE,
-                expires_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Create indexes for better performance
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_telegram_sessions_active 
-            ON telegram_sessions(is_active, expires_at)
-        """)
-        
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_telegram_sessions_name 
-            ON telegram_sessions(session_name)
-        """)
-
     async def initialize(self):
         """Initialize the database with optimized settings."""
         # Create connection pool
@@ -219,7 +192,7 @@ class DatabaseService:
                 )
             """)
             
-            # Create Instagram session tables
+            # Create session tables
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS instagram_sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -247,9 +220,6 @@ class DatabaseService:
                 )
             """)
             
-            # Create Telegram sessions table
-            await self._create_telegram_sessions_table(conn)
-            
             conn.execute("CREATE INDEX IF NOT EXISTS idx_operations_type ON file_operations(operation_type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_download_state_status ON download_state(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_download_state_completed ON download_state(completed)")
@@ -259,7 +229,7 @@ class DatabaseService:
             # Prepare statements
             await self._prepare_statements(conn)
             
-            # Prepare Instagram session statements
+            # Prepare session statements
             statements = {
                 'insert_session': """
                     INSERT INTO instagram_sessions 
@@ -302,36 +272,6 @@ class DatabaseService:
                 """
             }
             self._prepared_statements.update(statements)
-            
-            # Prepare Telegram session statements
-            telegram_statements = {
-                'insert_telegram_session': """
-                    INSERT INTO telegram_sessions (
-                        session_name, session_file_path, session_data, phone_number,
-                        is_active, expires_at, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                """,
-                'get_active_telegram_session': """
-                    SELECT id, session_name, session_file_path, session_data, phone_number,
-                           is_active, expires_at, created_at, updated_at
-                    FROM telegram_sessions 
-                    WHERE is_active = TRUE 
-                    AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
-                    ORDER BY updated_at DESC 
-                    LIMIT 1
-                """,
-                'deactivate_telegram_sessions': """
-                    UPDATE telegram_sessions 
-                    SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
-                    WHERE session_name = ?
-                """,
-                'cleanup_expired_telegram_sessions': """
-                    DELETE FROM telegram_sessions 
-                    WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP
-                """
-            }
-            self._prepared_statements.update(telegram_statements)
-            
         finally:
             self._pool.release(conn)
     
@@ -400,7 +340,7 @@ class DatabaseService:
         finally:
             self._pool.release(conn)
             
-    # Instagram session management methods
+    # Session management methods
     
     async def store_instagram_session(self, user_id: int, username: str, 
                                     session_type: str, session_data: str,
@@ -510,141 +450,6 @@ class DatabaseService:
             return cursor.rowcount
         finally:
             self._pool.release(conn)
-    
-    async def log_session_validation(self, session_id: int, 
-                                   is_valid: bool, 
-                                   error_message: Optional[str] = None):
-        """Log a session validation attempt."""
-        conn = self._pool.acquire()
-        try:
-            conn.execute(
-                self._prepared_statements['insert_validation'],
-                (session_id, is_valid, error_message)
-            )
-        finally:
-            self._pool.release(conn)
-    
-    # Telegram session management methods
-    
-    async def store_telegram_session(self, session_name: str, session_file_path: str,
-                                   session_data: str, phone_number: str,
-                                   is_active: bool = True, expires_at: Optional[datetime] = None) -> int:
-        """Store a Telegram session in the database.
-        
-        Args:
-            session_name: Name of the session (e.g., 'telegram_bot_session')
-            session_file_path: Path to the .session file
-            session_data: JSON string containing session metadata
-            phone_number: Phone number used for authentication
-            is_active: Whether this session is currently active
-            expires_at: When the session expires (optional)
-            
-        Returns:
-            int: Session ID
-        """
-        conn = self._pool.acquire()
-        try:
-            # First, deactivate any existing sessions if this one should be active
-            if is_active:
-                conn.execute(
-                    self._prepared_statements['deactivate_telegram_sessions'],
-                    (session_name,)
-                )
-            
-            # Insert new session
-            cursor = conn.execute(
-                self._prepared_statements['insert_telegram_session'],
-                (session_name, session_file_path, session_data, phone_number, is_active, expires_at)
-            )
-            
-            return cursor.lastrowid
-        finally:
-            self._pool.release(conn)
-
-    async def get_active_telegram_session(self) -> Optional[Dict[str, Any]]:
-        """Get the active Telegram session.
-        
-        Returns:
-            Dict containing session information or None if no active session
-        """
-        conn = self._pool.acquire()
-        try:
-            cursor = conn.execute(
-                self._prepared_statements['get_active_telegram_session']
-            )
-            
-            row = cursor.fetchone()
-            if row:
-                return {
-                    'id': row[0],
-                    'session_name': row[1], 
-                    'session_file_path': row[2],
-                    'session_data': row[3],
-                    'phone_number': row[4],
-                    'is_active': bool(row[5]),
-                    'expires_at': row[6],
-                    'created_at': row[7],
-                    'updated_at': row[8]
-                }
-            return None
-        finally:
-            self._pool.release(conn)
-
-    async def update_telegram_session(self, session_id: int, **kwargs) -> bool:
-        """Update a Telegram session record.
-        
-        Args:
-            session_id: ID of the session to update
-            **kwargs: Fields to update (session_data, is_active, expires_at)
-            
-        Returns:
-            bool: True if update was successful
-        """
-        if not kwargs:
-            return False
-            
-        # Build update query dynamically
-        set_clauses = []
-        values = []
-        
-        for field, value in kwargs.items():
-            if field in ['session_data', 'is_active', 'expires_at']:
-                set_clauses.append(f"{field} = ?")
-                values.append(value)
-        
-        if not set_clauses:
-            return False
-            
-        set_clauses.append("updated_at = CURRENT_TIMESTAMP")
-        values.append(session_id)
-        
-        query = f"""
-            UPDATE telegram_sessions 
-            SET {', '.join(set_clauses)}
-            WHERE id = ?
-        """
-        
-        conn = self._pool.acquire()
-        try:
-            cursor = conn.execute(query, values)
-            return cursor.rowcount > 0
-        finally:
-            self._pool.release(conn)
-
-    async def cleanup_expired_telegram_sessions(self) -> int:
-        """Clean up expired Telegram sessions.
-        
-        Returns:
-            int: Number of sessions cleaned up
-        """
-        conn = self._pool.acquire()
-        try:
-            cursor = conn.execute(
-                self._prepared_statements['cleanup_expired_telegram_sessions']
-            )
-            return cursor.rowcount
-        finally:
-            self._pool.release(conn)
             
     async def get_content_type_stats(self) -> Dict[str, int]:
         """Get download statistics broken down by content type.
@@ -689,6 +494,64 @@ class DatabaseService:
             return stats
         finally:
             self._pool.release(conn)
+    
+    async def log_session_validation(self, session_id: int, 
+                                   is_valid: bool, 
+                                   error_message: Optional[str] = None):
+        """Log a session validation attempt."""
+        conn = self._pool.acquire()
+        try:
+            conn.execute(
+                self._prepared_statements['insert_validation'],
+                (session_id, is_valid, error_message)
+            )
+        finally:
+            self._pool.release(conn)
+            
+    async def _prepare_session_statements(self, conn: sqlite3.Connection):
+        """Prepare SQL statements for session management."""
+        statements = {
+            'insert_session': """
+                INSERT INTO instagram_sessions 
+                (user_id, username, session_type, cookies_file_path, session_data, 
+                 is_active, last_validated, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            """,
+            'update_session': """
+                UPDATE instagram_sessions 
+                SET session_data = ?, is_active = ?, last_validated = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP, expires_at = ?
+                WHERE id = ?
+            """,
+            'insert_validation': """
+                INSERT INTO session_validations 
+                (session_id, is_valid, error_message)
+                VALUES (?, ?, ?)
+            """,
+            'get_active_session': """
+                SELECT id, session_type, cookies_file_path, session_data, last_validated
+                FROM instagram_sessions
+                WHERE user_id = ? AND is_active = 1
+                ORDER BY last_validated DESC
+                LIMIT 1
+            """,
+            'get_all_sessions': """
+                SELECT id, session_type, cookies_file_path, session_data, is_active, 
+                       last_validated, created_at, expires_at
+                FROM instagram_sessions
+                WHERE user_id = ?
+                ORDER BY is_active DESC, last_validated DESC
+            """,
+            'delete_session': """
+                DELETE FROM instagram_sessions WHERE id = ?
+            """,
+            'cleanup_expired_sessions': """
+                DELETE FROM instagram_sessions 
+                WHERE expires_at < CURRENT_TIMESTAMP
+                  OR (last_validated < datetime('now', '-7 days') AND NOT is_active)
+            """
+        }
+        self._prepared_statements.update(statements)
 
     async def record_download(
         self, 

@@ -288,73 +288,73 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             Exception: If any initialization step fails
         """
         try:
-            # Initialize components sequentially
-            await self._initialize_database()
-
-            # Add Telegram session table to database
-            await self._create_telegram_session_table()
-
-            # Initialize Telegram with persistent sessions
-            await self._initialize_telegram()
-
-            # Initialize other services
-            self._initialize_instagram()
-            self.services.instagram_service = self.instagram_downloader
-            self.services.session_storage = self.session_storage
-
-            await self._initialize_uploaders()
-
-            # Schedule maintenance tasks
-            await self._schedule_session_maintenance()
-
-            # Resume any interrupted downloads
-            try:
-                pending_downloads = await self.state_recovery.get_pending_downloads()
-                if pending_downloads:
-                    logger.info(f"Found {len(pending_downloads)} interrupted downloads  to resume")
-                    for state in pending_downloads:
-                        await self.state_recovery.resume_download(state)
-            except Exception as e:
-                logger.error("Failed to resume downloads", error=str(e))
-
-            logger.info("Bot initialized successfully with persistent sessions",    version=BOT_VERSION)
-
-        except Exception as e:
-            logger.error("Failed to initialize bot", error=str(e))
-            raise
-
-    async def _create_telegram_session_table(self):
-        """Ensure the telegram_sessions table exists."""
+        # Initialize components sequentially
+        await self._initialize_database()
+        
+        # Add Telegram session table to database
+        await self._create_telegram_session_table()
+        
+        # Initialize Telegram with persistent sessions
+        await self._initialize_telegram()
+        
+        # Initialize other services
+        self._initialize_instagram()
+        self.services.instagram_service = self.instagram_downloader
+        self.services.session_storage = self.session_storage
+        
+        await self._initialize_uploaders()
+        
+        # Schedule maintenance tasks
+        await self._schedule_session_maintenance()
+        
+        # Resume any interrupted downloads
         try:
-            conn = self.services.database_service._pool.acquire()
-            try:
-                await self.services.database_service._create_telegram_sessions_table    (conn)
-            finally:
-                self.services.database_service._pool.release(conn)
+            pending_downloads = await self.state_recovery.get_pending_downloads()
+            if pending_downloads:
+                logger.info(f"Found {len(pending_downloads)} interrupted downloads to resume")
+                for state in pending_downloads:
+                    await self.state_recovery.resume_download(state)
         except Exception as e:
-            logger.error(f"Failed to create telegram_sessions table: {e}")
-            raise
+            logger.error("Failed to resume downloads", error=str(e))
+        
+        logger.info("Bot initialized successfully with persistent sessions", version=BOT_VERSION)
+        
+    except Exception as e:
+        logger.error("Failed to initialize bot", error=str(e))
+        raise
 
-    async def _schedule_session_maintenance(self) -> None:
-        """Schedule periodic maintenance of stored sessions."""
-        async def session_cleanup():
-            try:
-                # Clean up expired Telegram sessions
-                deleted_count = await self.telegram_session_storage.    cleanup_old_sessions()
-                if deleted_count > 0:
-                    logger.info(f"Cleaned up {deleted_count} expired Telegram   sessions")
+async def _create_telegram_session_table(self):
+    """Ensure the telegram_sessions table exists."""
+    try:
+        conn = self.services.database_service._pool.acquire()
+        try:
+            await self.services.database_service._create_telegram_sessions_table(conn)
+        finally:
+            self.services.database_service._pool.release(conn)
+    except Exception as e:
+        logger.error(f"Failed to create telegram_sessions table: {e}")
+        raise
 
-                # Clean up expired Instagram sessions
-                if hasattr(self, 'session_storage'):
-                    instagram_deleted = await self.session_storage. cleanup_expired_sessions()
-                    if instagram_deleted > 0:
-                        logger.info(f"Cleaned up {instagram_deleted} expired Instagram  sessions")
-
-            except Exception as e:
-                logger.error(f"Session maintenance failed: {e}")
-
-        # Run session cleanup daily
-        self.bot_app.job_queue.run_repeating(session_cleanup, interval=24*60*60)
+async def _schedule_session_maintenance(self) -> None:
+    """Schedule periodic maintenance of stored sessions."""
+    async def session_cleanup():
+        try:
+            # Clean up expired Telegram sessions
+            deleted_count = await self.telegram_session_storage.cleanup_old_sessions()
+            if deleted_count > 0:
+                logger.info(f"Cleaned up {deleted_count} expired Telegram sessions")
+            
+            # Clean up expired Instagram sessions
+            if hasattr(self, 'session_storage'):
+                instagram_deleted = await self.session_storage.cleanup_expired_sessions()
+                if instagram_deleted > 0:
+                    logger.info(f"Cleaned up {instagram_deleted} expired Instagram sessions")
+                    
+        except Exception as e:
+            logger.error(f"Session maintenance failed: {e}")
+    
+    # Run session cleanup daily
+    self.bot_app.job_queue.run_repeating(session_cleanup, interval=24*60*60)
             
     def _initialize_instagram(self) -> None:
         """Initialize Instagram downloader and cleanup service."""
@@ -1436,31 +1436,28 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                 temp_cookie_file.unlink()
 
     async def shutdown(self) -> None:
-        """Shutdown with proper session cleanup."""
+        """Shutdown the bot with optimized cleanup."""
         try:
-            # Update session usage before shutdown
-            if hasattr(self, 'telegram_session_storage'):
-                session = await self.telegram_session_storage.get_active_session()
-                if session:
-                    await self.telegram_session_storage.update_session_usage(session    ['id'])
-            
-            # Standard shutdown procedure
             shutdown_tasks = []
             
+            # Stop bot application
             if self.bot_app:
                 if self.bot_app.updater:
                     shutdown_tasks.append(self.bot_app.updater.stop())
                 shutdown_tasks.append(self.bot_app.stop())
                 shutdown_tasks.append(self.bot_app.shutdown())
             
+            # Disconnect Telethon
             if self.telethon_client:
                 shutdown_tasks.append(self.telethon_client.disconnect())
             
+            # Close database
             if self.services.database_service:
                 shutdown_tasks.append(self.services.database_service.close())
             
+            # Run all cleanup tasks concurrently
             await asyncio.gather(*shutdown_tasks)
-            logger.info("Bot shutdown complete with session preservation")
+            logger.info("Bot shutdown complete")
             
         except Exception as e:
             logger.error("Error during shutdown", error=str(e))
