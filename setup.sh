@@ -14,7 +14,8 @@ if ! command -v docker &> /dev/null; then
     exit 1
 fi
 
-if ! command -v docker-compose &> /dev/null; then
+# Check for docker compose (both new and old syntax)
+if ! (command -v docker-compose &> /dev/null || docker compose version &> /dev/null); then
     echo -e "${RED}Docker Compose is not installed. Please install Docker Compose first.${NC}"
     exit 1
 fi
@@ -43,13 +44,22 @@ echo -e "${GREEN}Created downloads directory structure${NC}"
 
 # Build and start the containers
 echo -e "${YELLOW}Building and starting Docker containers...${NC}"
-docker-compose up --build -d
+if command -v docker-compose &> /dev/null; then
+    docker-compose up --build -d
+else
+    docker compose up --build -d
+fi
 
 # Check if containers are running
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}Setup completed successfully!${NC}"
-    echo -e "${YELLOW}To view logs, run: docker-compose logs -f${NC}"
-    echo -e "${YELLOW}To stop the bot, run: docker-compose down${NC}"
+    if command -v docker-compose &> /dev/null; then
+        echo -e "${YELLOW}To view logs, run: docker-compose logs -f${NC}"
+        echo -e "${YELLOW}To stop the bot, run: docker-compose down${NC}"
+    else
+        echo -e "${YELLOW}To view logs, run: docker compose logs -f${NC}"
+        echo -e "${YELLOW}To stop the bot, run: docker compose down${NC}"
+    fi
 else
     echo -e "${RED}Setup failed. Please check the error messages above.${NC}"
     exit 1
