@@ -31,8 +31,13 @@ class SessionTester:
     async def test_session(self):
         """Test Firefox session"""
         try:
-            # Initialize session manager
-            session_manager = InstagramSessionManager(self.downloads_path, INSTAGRAM_USERNAME)
+            # Initialize session manager with cookies file
+            cookies_file = Path("gallery-dl-cookies.txt")
+            if not cookies_file.exists():
+                print("\n❌ No cookies.txt file found. Please upload your Instagram cookies file first.")
+                return False
+                
+            session_manager = InstagramSessionManager(self.downloads_path, cookies_file)
             browser_valid = session_manager.check_session()
             
             print("\n=== Session Status ===")

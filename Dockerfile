@@ -12,12 +12,25 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install gallery-dl and yt-dlp globally
+RUN pip install --no-cache-dir gallery-dl yt-dlp
+
 # Copy the rest of the application
 COPY . .
 
-# Create volume mount points
-RUN mkdir -p /app/downloads/sessions
-VOLUME ["/app/downloads"]
+# Create required directories with proper permissions
+RUN mkdir -p /app/downloads /app/data /app/sessions /app/uploads /app/temp && \
+    chown -R 1000:1000 /app && \
+    chmod -R 775 /app && \
+    chmod g+s /app/data /app/sessions  # Ensure new files inherit group permissions
+
+# Set up runtime user
+RUN groupadd -g 1000 botuser && \
+    useradd -u 1000 -g botuser -s /bin/bash -m botuser && \
+    chown -R botuser:botuser /app
+
+# Switch to non-root user
+USER botuser
 
 # Create a healthcheck script
 COPY healthcheck.py .

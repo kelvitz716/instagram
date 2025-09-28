@@ -1,7 +1,8 @@
-"""Session manager for Instagram cookie management."""
+"""Session manager for Instagram cookie management using Netscape format cookies file."""
 import logging
 import os
 import time
+import shutil
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import requests
@@ -24,20 +25,70 @@ class InstagramSessionManager:
     MANUAL_CHECK_THRESHOLD = timedelta(minutes=10)  # If cookies refreshed within this time, might be rate limiting
     SESSION_REFRESH_URL = 'https://www.instagram.com/accounts/login/ajax/'
 
-    def __init__(self, downloads_path: Path, username: Optional[str] = None, cookies_file: Optional[Path] = None):
+    def __init__(self, downloads_path: Path, cookies_file: Optional[Path] = None):
         """Initialize the session manager.
         
         Args:
-            downloads_path: Path where downloads and cookies will be stored
-            username: Instagram username (optional)
-            cookies_file: Optional path to a Netscape-format cookies.txt file
+            downloads_path: Path where downloads will be stored
+            cookies_file: Path to a Netscape-format cookies.txt file containing Instagram session cookies
         """
         self.downloads_path = downloads_path
-        self.username = username
         self.cookies_file = cookies_file
         self._session_cookies: Dict[str, str] = {}
         self._last_cookie_refresh = None  # Timestamp of last successful cookie refresh
-        self._load_cookies()
+        if cookies_file and cookies_file.exists():
+            self._load_cookies()
+
+    async def load_cookies_from_file(self, file_path: Path) -> Dict[str, str]:
+        """Load cookies from a file and store them in the configured location.
+        
+        Args:
+            file_path: Path to the cookie file to load
+            
+        Returns:
+            Dict containing the session cookies
+            
+        Raises:
+            InstagramSessionError: If cookies are invalid or can't be loaded
+        """
+        try:
+            # Make sure the file exists
+            if not file_path.exists():
+                raise InstagramSessionError("Cookie file not found")
+
+            # Parse cookies from file
+            cookies = self._load_netscape_cookies(file_path)
+            session_cookies = {}
+
+            # Extract Instagram cookies
+            for cookie in cookies:
+                if cookie['domain'].endswith(self.COOKIE_DOMAIN):
+                    masked_value = f"{str(cookie['value'])[:10]}..."
+                    logger.debug(f"Found cookie: {cookie['name']} = {masked_value}")
+                    session_cookies[cookie['name']] = cookie['value']
+
+            # Validate required cookies are present
+            missing_cookies = [name for name in self.REQUIRED_COOKIES 
+                             if name not in session_cookies]
+                             
+            if missing_cookies:
+                raise InstagramSessionError(
+                    f"Missing required cookies: {', '.join(missing_cookies)}"
+                )
+
+            # If file is not already in the configured location, copy it
+            if file_path != self.cookies_file:
+                os.makedirs(os.path.dirname(self.cookies_file), exist_ok=True)
+                shutil.copy2(file_path, self.cookies_file)
+            
+            # Load the cookies into the manager
+            self._session_cookies = session_cookies
+            self._last_cookie_refresh = datetime.now()
+
+            return session_cookies
+
+        except Exception as e:
+            raise InstagramSessionError(f"Failed to load cookies: {str(e)}")
 
     def _load_cookies(self, max_retries: int = 3, initial_delay: float = 1.0) -> None:
         """Load cookies from Netscape file and validate them with retries."""
@@ -49,8 +100,8 @@ class InstagramSessionManager:
                 if attempt > 0:
                     logger.info(f"Retrying cookie load (attempt {attempt}/{max_retries})")
 
-                if not self.cookies_file or not self.cookies_file.exists():
-                    raise InstagramSessionError("No cookies.txt file found. Please use /session_upload command to provide Instagram cookies.")
+                if not self.cookies_file.exists():
+                    raise InstagramSessionError("No cookies.txt file found at specified path. Please provide a valid Netscape-format cookies.txt file.")
 
                 logger.info(f"Loading Instagram cookies from Netscape-format file: {self.cookies_file}")
                 cookies = self._load_netscape_cookies(self.cookies_file)
@@ -245,11 +296,11 @@ class InstagramSessionManager:
             
     def debug_cookies(self) -> None:
         """Debug helper to log all available Instagram cookies."""
-        logger.info("Available Instagram cookies in Firefox:")
-        for cookie in browser_cookie3.firefox():
-            if cookie.domain == self.COOKIE_DOMAIN:
-                masked_value = f"{str(cookie.value)[:10]}..."
-                logger.info(f"Cookie: {cookie.name} = {masked_value} (domain: {cookie.domain})")
+        logger.info("Available Instagram cookies:")
+        for name, value in self._session_cookies.items():
+            if name in self.REQUIRED_COOKIES:
+                masked_value = f"{str(value)[:10]}..."
+                logger.info(f"Cookie: {name} = {masked_value} (domain: {self.COOKIE_DOMAIN})")
     
     def check_session(self) -> bool:
         """Check if we have all required cookies."""
@@ -258,11 +309,3 @@ class InstagramSessionManager:
             return True
         except InstagramSessionError:
             return False
-    
-    def debug_cookies(self) -> None:
-        """Debug helper to log all available Instagram cookies."""
-        logger.info("Available Instagram cookies in Firefox:")
-        for cookie in browser_cookie3.firefox():
-            if cookie.domain == self.COOKIE_DOMAIN:
-                masked_value = f"{str(cookie.value)[:10]}..."
-                logger.info(f"Cookie: {cookie.name} = {masked_value} (domain: {cookie.domain})")

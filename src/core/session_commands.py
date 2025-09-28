@@ -7,6 +7,8 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
+from src.core.session_manager import InstagramSessionManager
+from src.services.session_storage import SessionStorageService
 
 logger = logging.getLogger(__name__)
 

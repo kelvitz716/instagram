@@ -29,26 +29,28 @@ class InstagramDownloader:
     """
     
     def __init__(self, config: InstagramConfig, downloads_path: Path, cookies_file: Optional[Path] = None):
-        """Initialize the Instagram downloader.
+        """
+        Initialize the Instagram downloader with configuration.
         
         Args:
-            config: Configuration for the downloader
-            downloads_path: Path where downloads will be stored
-            cookies_file: Optional path to a Netscape-format cookies.txt file
+            config (InstagramConfig): Configuration object for Instagram
+            downloads_path (Path): Path to store downloaded files
+            cookies_file (Optional[Path]): Path to Netscape-format cookies file
         """
         self.config = config
         self.downloads_path = downloads_path
-        self.downloads_path.mkdir(parents=True, exist_ok=True)
-
-        # Initialize session manager with cookies file if provided
-        try:
-            self.session_manager = InstagramSessionManager(downloads_path, config.username, cookies_file=cookies_file)
-        except InstagramSessionError as e:
-            logger.error(f"Failed to initialize sessions: {e}")
-            raise
+        self.cookies_file = cookies_file
+        self.session_manager = None
+        
+        if cookies_file:
+            try:
+                self.session_manager = InstagramSessionManager(downloads_path, cookies_file)
+            except InstagramSessionError as e:
+                logger.error(f"Failed to initialize sessions: {e}")
+                # Don't raise - let the bot start without an initial session
 
         # Path to executables
-        self.gallery_dl_path = Path("/workspaces/instagram/.venv/bin/gallery-dl")
+        self.gallery_dl_path = Path("/usr/local/bin/gallery-dl")
         
     async def refresh_session(self) -> None:
         """Attempt to refresh the Instagram session.
@@ -80,8 +82,8 @@ class InstagramDownloader:
                 raise InstagramSessionError(f"Login failed: {message}")
         except Exception as e:
             raise InstagramSessionError(f"Login failed: {str(e)}")
-        self.gallery_dl_path = Path("/home/kelvitz/Github/instagram/myenv/bin/gallery-dl")
-        self.yt_dlp_path = Path("/home/kelvitz/Github/instagram/myenv/bin/yt-dlp")
+        self.gallery_dl_path = Path("/usr/local/bin/gallery-dl")
+        self.yt_dlp_path = Path("/usr/local/bin/yt-dlp")
         
     async def _check_session_before_download(self) -> bool:
         """Check if we have a valid session before attempting download.

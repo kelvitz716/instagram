@@ -25,6 +25,7 @@ myenv/
 .env
 .venv
 ENV/
+pyvenv.cfg
 
 # IDE
 .idea/
@@ -36,7 +37,11 @@ ENV/
 # Project specific
 downloads/
 uploads/
+tmp/
+data/
+sessions/
 *.db
+*.db-*
 *.sqlite
 *.sqlite3
 *.log
@@ -44,6 +49,48 @@ gallery-dl.conf
 gallery-dl-cookies.txt
 .gallery-dl.cache
 cookies.txt
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Telegram sessions
+*.session
+*.session-journal
+telegram_bot_session*
+
+# Instagram cookies
+*cookies*.txt
+.firefox_cookies*
+
+# Documentation
+*.pdf
+*.md
+!README.md
+
+# Temporary files
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+temp/
+
+# SQLite WAL mode files
+*.db-shm
+*.db-wal
+
+# Cache files
+.mypy_cache/
+.pylint.d/
+__pycache__
+
+# Local development
+local_settings.py
+docker-compose.override.yml
+
 
 # Telegram session files
 *.session
@@ -101,3 +148,4 @@ src/services/__pycache__/bot_api_uploader.cpython-313.pyc
 src/__pycache__/bot.cpython-313.pyc
 bot_data.db-shm
 bot_data.db-wal
+gallery-dl-cookies.txt

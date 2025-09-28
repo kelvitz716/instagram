@@ -1,8 +1,8 @@
-# Instagram Downloader Bot
+# Instagram Content Downloader Bot
 
-A Telegram bot that downloads content from Instagram posts, reels, and carousels using gallery-dl with Firefox cookies.
+A sophisticated Telegram bot for downloading Instagram content, supporting posts, reels, stories, highlights, and profiles with optimized performance and resilient service-based architecture.
 
-## Features
+## 🚀 Features
 
 - Download Instagram posts (single image/video)
 - Download Instagram reels

@@ -1,27 +1,26 @@
 # Core dependencies
-python-dotenv>=0.19.0
-structlog>=21.1.0
-rich>=10.9.0
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
-python-telegram-bot[job-queue]
+python-dotenv>=1.0.0
+structlog>=23.1.0
+rich>=13.6.0
+pydantic>=2.4.2
+pydantic-settings>=2.0.3
+python-telegram-bot[job-queue]>=20.6
 
 # Telegram
-python-telegram-bot>=20.0
-telethon>=1.24.0
+telethon>=1.31.0
 
 # Instagram downloader
-gallery-dl>=1.25.1
-instaloader>=4.10.0
+gallery-dl>=1.25.8
+instaloader>=4.10.2
 
 # Database
-aiosqlite>=0.17.0
+aiosqlite>=0.19.0
 
 # HTTP client
-httpx>=0.24.0
+httpx>=0.25.0
 
 # Progress tracking
-tqdm>=4.65.0
+tqdm>=4.66.1
 asyncio-throttle>=1.0.2
 watchdog>=3.0.0
 
@@ -29,4 +28,12 @@ watchdog>=3.0.0
 python-magic>=0.4.27
 
 # Type hints
-typing_extensions>=4.4.0
+typing_extensions>=4.8.0
+
+# Testing and development
+pytest>=7.4.2
+pytest-asyncio>=0.21.1
+pytest-cov>=4.1.0
+black>=23.9.1
+isort>=5.12.0
+flake8>=6.1.0

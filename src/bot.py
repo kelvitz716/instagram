@@ -41,17 +41,24 @@ from telegram.ext import (
 from telegram import error as telegram_error
 from telethon import TelegramClient
 
-# Local imports
-from src.core.help_command import HelpCommandMixin
-from src.core.session_commands import SessionCommands
-
-# Local application imports
+# Core imports
 from src.core.config import BotConfig
 from src.core.services import BotServices
 from src.core.resilience.retry import with_retry
 from src.core.resilience.circuit_breaker import with_circuit_breaker, ServiceUnavailableError
 from src.core.resilience.recovery import SessionRecovery, StateRecovery
+from src.core.help_command import HelpCommandMixin
 from src.core.session_commands import SessionCommands
+from src.core.session_manager import InstagramSessionManager
+
+# Local imports
+from src.services.database import DatabaseService
+from src.services.upload import FileUploadService
+from src.services.bot_api_uploader import BotAPIUploader
+from src.services.telethon_uploader import TelethonUploader
+from src.services.instagram_downloader import InstagramDownloader
+from src.services.progress import ProgressTracker
+from src.services.session_storage import SessionStorageService, SessionStorageError
 from src.services.database import DatabaseService
 from src.services.upload import FileUploadService
 from src.services.bot_api_uploader import BotAPIUploader
@@ -314,21 +321,22 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         """Initialize Instagram downloader and cleanup service."""
         downloads_path = self.config.downloads_path
         
-        # Use gallery-dl-cookies.txt from the project root as cookie source
-        cookies_file = pathlib.Path(__file__).parent.parent / 'gallery-dl-cookies.txt'
-        if not cookies_file.exists():
-            raise ValueError(f"gallery-dl-cookies.txt file not found at {cookies_file}. Please ensure it exists in the project root.")
-            
-        self.instagram_downloader = InstagramDownloader(
-            self.config.instagram,
-            downloads_path=downloads_path,
-            cookies_file=cookies_file  # Pass Path object directly
-        )
-        
-        # Initialize session storage service
+        # Initialize session storage service first
         self.session_storage = SessionStorageService(
             self.services.database_service,
             downloads_path
+        )
+
+        # Create session manager instance
+        self.session_manager = InstagramSessionManager(
+            downloads_path=downloads_path,
+            cookies_file=None  # Start without cookies, they'll be loaded per user
+        )
+
+        # Initialize Instagram downloader without cookies
+        self.instagram_downloader = InstagramDownloader(
+            self.config.instagram,
+            downloads_path=downloads_path
         )
         
         # Initialize cleanup service with 2-day retention
@@ -1059,6 +1067,9 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
 
     async def handle_session_upload_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Start the session upload process and wait for file."""
+        if not update.effective_user:
+            return
+
         if context.user_data.get('waiting_for_cookie_file'):
             # Already waiting for a file
             await update.message.reply_text(
@@ -1129,8 +1140,7 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                 "⌛ Upload window expired. Please use /session_upload to try again."
             )
             return
-            
-        # Clear waiting flags
+
         # Send initial status
         status_message = await update.message.reply_text(
             "⏳ Downloading and validating cookie file..."
@@ -1145,18 +1155,36 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
 
             # Download the file
             file = await context.bot.get_file(update.message.document.file_id)
-            temp_cookie_file = Path('temp_cookies.txt')
+            
+            # Create user-specific cookie file paths
+            cookies_dir = self.config.downloads_path / 'cookies'
+            user_cookie_dir = cookies_dir / str(user.id)
+            user_cookie_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create temp and final paths
+            temp_cookie_file = user_cookie_dir / f"temp_cookies_{int(time.time())}.txt"
+            final_cookie_file = user_cookie_dir / "cookies.txt"
+            
             await file.download_to_drive(temp_cookie_file)
 
             try:
+                # Create temporary session manager for validation
+                temp_session_manager = InstagramSessionManager(
+                    downloads_path=self.config.downloads_path,
+                    cookies_file=temp_cookie_file
+                )
+
                 # Load and validate the cookies
                 await self._safe_edit_message(status_message, "🔍 Validating cookies...")
-                self.instagram_downloader.session_manager._load_cookies()
+                # Load and validate cookies
+                session_cookies = await temp_session_manager.load_cookies_from_file(temp_cookie_file)
 
                 # Try an Instagram API call to verify the session
-                is_valid, message = await self.instagram_downloader.session_manager._test_session()
+                is_valid, message = await temp_session_manager._test_session()
                 
                 if not is_valid:
+                    if temp_cookie_file.exists():
+                        temp_cookie_file.unlink()
                     await self._safe_edit_message(
                         status_message,
                         f"❌ Invalid cookies: {message}\n\n"
@@ -1164,35 +1192,41 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                     )
                     return
                     
-                # Delete any existing sessions for this user
-                await self._safe_edit_message(status_message, "⏳ Cleaning up old sessions...")
-
-                # Check if user already has a session
-                existing_sessions = await self.services.database_service.get_all_sessions(user.id)
-                if existing_sessions:
-                    await self._safe_edit_message(
-                        status_message,
-                        "⚠️ You already have an active session.\n"
-                        "Please use /session_list to manage your existing sessions first."
-                    )
-                    return
+                # Clean up any existing sessions for this user
+                await self._safe_edit_message(status_message, "⏳ Managing sessions...")
 
                 # Store the session in the database
-                username = "instagram_user"  # TODO: Extract from cookies
+                username = session_cookies.get('ds_user_id', 'unknown')  # Get username from cookies
+                
+                # Move temp cookie file to permanent location
+                if final_cookie_file.exists():
+                    final_cookie_file.unlink()  # Remove old cookie file if exists
+                    logger.info(f"Removed existing cookie file for user {user.id}")
+                temp_cookie_file.rename(final_cookie_file)  # Move temp file to permanent location
+                logger.info(f"Created new cookie file at {final_cookie_file}")
+
+                # Clean up any leftover temp files
+                for temp_file in user_cookie_dir.glob("temp_cookies_*.txt"):
+                    if temp_file != final_cookie_file:
+                        try:
+                            temp_file.unlink()
+                            logger.info(f"Cleaned up temporary cookie file: {temp_file}")
+                        except Exception as e:
+                            logger.warning(f"Failed to clean up temporary file {temp_file}: {e}")
                 
                 # Create JSON-serializable session data
                 session_data = {
                     "status": "valid",
                     "last_checked": datetime.now().isoformat(),
-                    "cookie_file": str(temp_cookie_file)
+                    "cookie_file": str(final_cookie_file)
                 }
                 
                 session_id = await self.services.session_storage.store_session(
                     user_id=user.id,
                     username=username,
                     session_type='cookie_file',
-                    session_data=session_data,  # SessionStorageService will handle JSON conversion
-                    cookies_file_path=temp_cookie_file,
+                    session_data=session_data,
+                    cookies_file_path=final_cookie_file,
                     make_active=True
                 )
 
@@ -1204,7 +1238,8 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                 await self._safe_edit_message(
                     status_message,
                     "✅ Session validated and stored successfully!\n\n"
-                    "You can now use this bot to download Instagram content."
+                    "You can now use this bot to download Instagram content.\n"
+                    "Use /session_list to manage your sessions."
                 )
 
             except Exception as e:
@@ -1215,6 +1250,8 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                     "Please ensure your cookies are valid and try again."
                 )
                 logger.error(f"Session validation failed for user {user.id}: {error_msg}")
+                if temp_cookie_file.exists():
+                    temp_cookie_file.unlink()
 
         except Exception as e:
             error_msg = str(e)
@@ -1223,9 +1260,6 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
                 f"❌ Failed to process cookie file: {error_msg}"
             )
             logger.error(f"Cookie file processing failed for user {user.id}: {error_msg}")
-        
-        finally:
-            # Clean up temporary file
             if temp_cookie_file.exists():
                 temp_cookie_file.unlink()
 

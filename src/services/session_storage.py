@@ -71,24 +71,53 @@ class SessionStorageService:
             raise SessionStorageError(f"Failed to store session: {str(e)}")
     
     def _store_cookie_file(self, user_id: int, source_path: Path) -> Path:
-        """Store a cookie file in the sessions directory."""
+        """Store a cookie file in the sessions directory with enhanced error handling."""
         try:
+            # Validate source file
+            if not source_path.exists():
+                raise SessionStorageError(f"Source cookie file not found: {source_path}")
+                
+            if source_path.stat().st_size == 0:
+                raise SessionStorageError("Cookie file is empty")
+                
             # Create user-specific directory
             user_path = self.sessions_path / str(user_id)
-            user_path.mkdir(exist_ok=True)
+            user_path.mkdir(parents=True, exist_ok=True)
             
-            # Generate unique filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            dest_path = user_path / f"cookies_{timestamp}.txt"
+            # Create final path
+            dest_path = user_path / "cookies.txt"
+            temp_path = user_path / f"temp_cookies_{int(datetime.now().timestamp())}.txt"
             
-            # Copy file
-            with open(source_path, 'r') as src, open(dest_path, 'w') as dst:
-                dst.write(src.read())
+            try:
+                # First copy to temp file
+                with open(source_path, 'r', encoding='utf-8') as src, \
+                     open(temp_path, 'w', encoding='utf-8') as dst:
+                    content = src.read()
+                    if not any(domain in content for domain in ['.instagram.com', 'instagram.com']):
+                        raise SessionStorageError("No Instagram cookies found in file")
+                    dst.write(content)
                 
-            return dest_path
+                # If copy successful, move to final location
+                if dest_path.exists():
+                    dest_path.unlink()
+                temp_path.rename(dest_path)
+                logger.info(f"Successfully stored cookie file for user {user_id}")
+                
+                return dest_path
+                
+            finally:
+                # Clean up temp file if it exists
+                if temp_path.exists():
+                    temp_path.unlink()
             
         except Exception as e:
             logger.error(f"Failed to store cookie file: {e}")
+            # Clean up destination file if it exists after error
+            if 'dest_path' in locals() and dest_path.exists():
+                try:
+                    dest_path.unlink()
+                except Exception:
+                    pass
             raise SessionStorageError(f"Failed to store cookie file: {str(e)}")
     
     async def get_active_session(self, user_id: int) -> Optional[Dict[str, Any]]:
@@ -165,12 +194,22 @@ class SessionStorageService:
             # Delete cookie file if it exists
             if session['cookies_file_path']:
                 try:
-                    Path(session['cookies_file_path']).unlink()
+                    cookie_file = Path(session['cookies_file_path'])
+                    if cookie_file.exists():
+                        cookie_file.unlink()
+                        logger.info(f"Deleted cookie file for session {session_id}")
+                    user_dir = cookie_file.parent
+                    if user_dir.exists() and not any(user_dir.iterdir()):
+                        user_dir.rmdir()
+                        logger.info(f"Removed empty user directory: {user_dir}")
                 except Exception as e:
                     logger.warning(f"Failed to delete cookie file: {e}")
             
             # Delete from database
-            return await self.db.delete_session(session_id)
+            success = await self.db.delete_session(session_id)
+            if success:
+                logger.info(f"Successfully deleted session {session_id} for user {user_id}")
+            return success
             
         except Exception as e:
             logger.error(f"Failed to delete session: {e}")
