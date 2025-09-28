@@ -38,9 +38,36 @@ if [ ! -f "gallery-dl-cookies.txt" ]; then
     exit 1
 fi
 
-# Create downloads directory if it doesn't exist
-mkdir -p downloads/sessions
-echo -e "${GREEN}Created downloads directory structure${NC}"
+# Create all required directories with proper permissions
+echo -e "${YELLOW}Creating required directories...${NC}"
+mkdir -p downloads data sessions uploads temp telegram
+chmod 775 downloads data sessions uploads temp telegram
+
+# Set up proper ownership (try to match container's botuser)
+if getent group botuser > /dev/null 2>&1; then
+    BOTGROUP="botuser"
+else
+    # If botuser group doesn't exist, use the current user's group
+    BOTGROUP=$(id -gn)
+fi
+
+if id botuser > /dev/null 2>&1; then
+    BOTUSER="botuser"
+else
+    # If botuser doesn't exist, use the current user
+    BOTUSER=$USER
+fi
+
+# Attempt to set ownership, but don't fail if it doesn't work (might need sudo)
+chown $BOTUSER:$BOTGROUP downloads data sessions uploads temp telegram 2>/dev/null || true
+
+echo -e "${GREEN}Created directory structure:${NC}"
+echo -e "  - downloads/: For downloaded media"
+echo -e "  - data/: For database and persistent data"
+echo -e "  - sessions/: For Telegram session files"
+echo -e "  - uploads/: For processed files ready to upload"
+echo -e "  - temp/: For temporary files"
+echo -e "  - telegram/: For Telegram-related files"
 
 # Build and start the containers
 echo -e "${YELLOW}Building and starting Docker containers...${NC}"
