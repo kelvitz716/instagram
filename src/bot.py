@@ -304,6 +304,9 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
 
             await self._initialize_uploaders()
 
+            # Start resource monitoring
+            await self.resource_manager.start_monitoring()
+
             # Schedule maintenance tasks
             await self._schedule_session_maintenance()
 
@@ -381,6 +384,16 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         # Initialize cleanup service with 2-day retention
         from src.services.cleanup import CleanupService
         self.cleanup_service = CleanupService(downloads_path, max_age_days=2)
+        
+        # Initialize resource management
+        from src.services.resource_manager import ResourceManager
+        self.resource_manager = ResourceManager(
+            config=self.config,
+            db_service=self.services.database_service,
+            cleanup_service=self.cleanup_service,
+            telegram_session_storage=self.telegram_session_storage,
+            instagram_session_storage=self.session_storage
+        )
         
     async def handle_cleanup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /cleanup command for manual media cleanup."""
@@ -792,8 +805,9 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         """Handle /stats command with enhanced statistics including content type breakdown."""
         stats = await self.services.database_service.get_statistics()
         
-        # Get storage stats
-        storage_stats = self.cleanup_service.get_storage_stats()
+        # Get resource stats
+        resource_stats = await self.resource_manager.get_resource_stats()
+        storage_stats = resource_stats.get('storage', {})
         
         # Get content type breakdown if available
         content_stats = await self.services.database_service.get_content_type_stats()
@@ -1447,11 +1461,15 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
     async def shutdown(self) -> None:
         """Shutdown with proper session cleanup."""
         try:
+            # Stop resource monitoring
+            if hasattr(self, 'resource_manager'):
+                await self.resource_manager.stop_monitoring()
+
             # Update session usage before shutdown
             if hasattr(self, 'telegram_session_storage'):
                 session = await self.telegram_session_storage.get_active_session()
                 if session:
-                    await self.telegram_session_storage.update_session_usage(session    ['id'])
+                    await self.telegram_session_storage.update_session_usage(session['id'])
             
             # Standard shutdown procedure
             shutdown_tasks = []

@@ -26,6 +26,7 @@ WORKDIR /app
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     tini \
+    procps \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1000 botuser \
     && useradd -u 1000 -g botuser -s /bin/bash -m botuser

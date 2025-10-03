@@ -26,6 +26,7 @@ watchdog>=3.0.0
 
 # System
 python-magic>=0.4.27
+psutil>=5.9.6
 
 # Type hints
 typing_extensions>=4.8.0
