@@ -6,7 +6,20 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${YELLOW}Starting Instagram Telegram Bot Setup with Persistent Sessions...${NC}"
+# Check if setup has already been completed
+if [ -f ".setup_complete" ]; then
+    echo -e "${YELLOW}Setup has already been completed!${NC}"
+    echo -e "${YELLOW}If you need to run setup again, delete the .setup_complete file${NC}"
+    echo -e "\n${GREEN}=== Quick Reference Commands ===${NC}"
+    echo -e "Start bot:      docker compose up -d"
+    echo -e "Stop bot:       docker compose down"
+    echo -e "View logs:      docker compose logs -f"
+    echo -e "Restart bot:    docker compose restart"
+    echo -e "Check status:   docker compose ps"
+    exit 0
+fi
+
+echo -e "${YELLOW}Starting Instagram Telegram Bot Initial Setup...${NC}"
 
 # --- Setup Docker Compose Command for Backward Compatibility ---
 
@@ -93,70 +106,13 @@ if [ ${#MISSING_VARS[@]} -ne 0 ]; then
     exit 1
 fi
 
-# Function to check if bot is running and has persistent sessions
-check_bot_status() {
-    local max_attempts=60  # Increased to 2 minutes
-    local attempt=0
-    
-    echo -e "${YELLOW}Checking bot startup and session status...${NC}"
-    
-    while [ $attempt -lt $max_attempts ]; do
-        # Check for successful initialization
-        if docker compose logs bot 2>/dev/null | grep -q "Bot initialized successfully with persistent sessions"; then
-            echo -e "${GREEN}Bot started successfully with persistent sessions!${NC}"
-            return 0
-        fi
-        
-        # Check if bot is waiting for authentication
-        if docker compose logs bot 2>/dev/null | grep -q "Starting Telegram authentication"; then
-            echo -e "${YELLOW}Bot is waiting for authentication input...${NC}"
-            return 1
-        fi
-        
-        # Check for initialization failure
-        if docker compose logs bot 2>/dev/null | grep -q "Failed to initialize"; then
-            echo -e "${RED}Bot initialization failed. Check logs for details.${NC}"
-            docker compose logs --tail=20 bot
-            return 2
-        fi
-        
-        sleep 2
-        attempt=$((attempt + 1))
-        echo -n "."
-    done
-    
-    echo -e "${RED}Timeout waiting for bot to start${NC}"
-    return 3
-}
-
-# Function to handle interactive authentication
-handle_authentication() {
-    echo -e "${YELLOW}Bot needs Telegram authentication...${NC}"
-    echo -e "${RED}*** IMPORTANT INSTRUCTIONS ***${NC}"
-    echo -e "${YELLOW}The bot will prompt for your phone number and verification code.${NC}"
-    echo -e "${YELLOW}This is a ONE-TIME setup that will be saved permanently.${NC}"
-    echo -e "${RED}*** Follow the prompts carefully ***${NC}"
-    echo ""
-    
-    # Stop the detached container
-    echo -e "${YELLOW}Stopping detached container...${NC}"
-    $DOCKER_COMPOSE_BIN down
-    
-    # Start in interactive mode for authentication
-    echo -e "${YELLOW}Starting authentication process...${NC}"
-    echo -e "${YELLOW}Enter your information when prompted by the bot.${NC}"
-    echo ""
-    
-    # Run interactively
-    $DOCKER_COMPOSE_BIN run --rm -it bot python bot.py
-    
-    # Check if authentication was successful by looking for session file
-    if [ -f "sessions/telegram_bot_session.session" ]; then
-        echo -e "${GREEN}Authentication successful! Session file created.${NC}"
+# Function to check if session exists and is valid
+check_session() {
+    if [ -f "sessions/telegram_bot_session.session" ] && [ -s "sessions/telegram_bot_session.session" ]; then
+        echo -e "${GREEN}Valid Telegram session found!${NC}"
         return 0
     else
-        echo -e "${RED}Authentication may have failed - no session file found.${NC}"
-        echo -e "${YELLOW}The bot will attempt to use database-stored session on next start.${NC}"
+        echo -e "${YELLOW}No valid Telegram session found${NC}"
         return 1
     fi
 }
@@ -170,77 +126,55 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-echo -e "${YELLOW}Starting bot with persistent session management...${NC}"
+# Run Telegram authentication
+echo -e "${YELLOW}Starting Telegram authentication process...${NC}"
+chmod +x telegram_auth.sh
+./telegram_auth.sh
+
+if [ $? -ne 0 ]; then
+    echo -e "${RED}Telegram authentication failed. Please try again.${NC}"
+    exit 1
+fi
+
+# Verify session file one last time
+if ! check_session; then
+    echo -e "${RED}Failed to verify Telegram session. Please run setup.sh again.${NC}"
+    exit 1
+fi
+
+# Start the bot in detached mode
+echo -e "${YELLOW}Starting bot in detached mode...${NC}"
 $DOCKER_COMPOSE_BIN up -d
 
-# Wait a moment for container to start
-sleep 5
+# Create setup complete marker
+touch .setup_complete
 
-# Check bot status
-check_bot_status
-exit_code=$?
+echo -e "${GREEN}=== Initial setup completed successfully! ===${NC}"
+echo -e "${GREEN}Bot is running with persistent Telegram sessions.${NC}"
 
-case $exit_code in
-    0)
-        echo -e "${GREEN}=== Setup completed successfully! ===${NC}"
-        echo -e "${GREEN}Bot is running with persistent Telegram sessions.${NC}"
-        ;;
-    1)
-        echo -e "${YELLOW}Bot requires authentication...${NC}"
-        if handle_authentication; then
-            # Start in detached mode after successful auth
-            echo -e "${YELLOW}Starting bot in background...${NC}"
-            $DOCKER_COMPOSE_BIN up -d
-            
-            # Verify it's working
-            sleep 5
-            if check_bot_status; then
-                echo -e "${GREEN}=== Setup completed successfully! ===${NC}"
-                echo -e "${GREEN}Bot is now running with persistent sessions.${NC}"
-            else
-                echo -e "${YELLOW}Authentication completed but bot status unclear.${NC}"
-                echo -e "${YELLOW}Check logs: docker compose logs -f${NC}"
-            fi
-        else
-            echo -e "${YELLOW}Authentication completed. Starting bot...${NC}"
-            $DOCKER_COMPOSE_BIN up -d
-            sleep 5
-            echo -e "${YELLOW}Bot may be starting up. Monitor logs: docker compose logs -f${NC}"
-        fi
-        ;;
-    2)
-        echo -e "${RED}Bot initialization failed.${NC}"
-        echo -e "${RED}Please check the error messages above and fix any issues.${NC}"
-        exit 1
-        ;;
-    3)
-        echo -e "${YELLOW}Bot startup status unclear. Checking current status...${NC}"
-        if docker compose ps | grep -q "Up"; then
-            echo -e "${YELLOW}Container is running. Check logs for details:${NC}"
-            echo -e "${YELLOW}docker compose logs -f${NC}"
-        else
-            echo -e "${RED}Container failed to start. Check logs:${NC}"
-            docker compose logs --tail=30 bot
-            exit 1
-        fi
-        ;;
-esac
-
-echo -e "${YELLOW}=== Useful Commands ===${NC}"
-echo -e "View logs:      $DOCKER_COMPOSE_BIN logs -f"
-echo -e "Stop bot:       $DOCKER_COMPOSE_BIN down"
-echo -e "Restart bot:    $DOCKER_COMPOSE_BIN restart"
-echo -e "Bot status:     $DOCKER_COMPOSE_BIN ps"
-echo -e "Session status: Send /telegram_status to your bot"
-
-# Show current status
-echo -e "${YELLOW}=== Current Status ===${NC}"
-$DOCKER_COMPOSE_BIN ps
-
-echo -e "${GREEN}=== Setup Summary ===${NC}"
+echo -e "\n${GREEN}=== Setup Summary ===${NC}"
 echo -e "✅ Directories created with proper permissions"
 echo -e "✅ Database migrations applied" 
+echo -e "✅ Telegram authentication completed"
+echo -e "✅ Session file saved in sessions/telegram_bot_session.session"
 echo -e "✅ Docker containers built and started"
-echo -e "✅ Telegram sessions are now persistent across restarts"
-echo -e ""
-echo -e "${YELLOW}Next time you restart, the bot will automatically use the stored session!${NC}"
+
+echo -e "\n${YELLOW}=== Important Information ===${NC}"
+echo -e "Your Telegram session is saved in: sessions/telegram_bot_session.session"
+echo -e "This file is crucial for authentication - DO NOT delete it!"
+echo -e "The sessions directory is persistent and will preserve your login"
+
+echo -e "\n${GREEN}=== Daily Usage Commands ===${NC}"
+echo -e "Start bot:      $DOCKER_COMPOSE_BIN up -d"
+echo -e "Stop bot:       $DOCKER_COMPOSE_BIN down"
+echo -e "View logs:      $DOCKER_COMPOSE_BIN logs -f"
+echo -e "Restart bot:    $DOCKER_COMPOSE_BIN restart"
+echo -e "Check status:   $DOCKER_COMPOSE_BIN ps"
+echo -e "Check session:  Send /telegram_status to your bot"
+
+# Show current status
+echo -e "\n${YELLOW}=== Current Status ===${NC}"
+$DOCKER_COMPOSE_BIN ps
+
+echo -e "\n${GREEN}Setup is complete! The bot will use the stored session for all future starts.${NC}"
+echo -e "${YELLOW}To run setup again in the future, delete the .setup_complete file${NC}"

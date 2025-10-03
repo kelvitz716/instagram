@@ -49,20 +49,35 @@ nano .env  # or use any text editor
 3. Add your Instagram cookies:
 - Create or copy your `gallery-dl-cookies.txt` file into the project directory
 
-4. Run the setup script:
+4. Run the initial setup script:
 ```bash
 chmod +x setup.sh
 ./setup.sh
 ```
 
-That's it! The bot should now be running in a Docker container.
+During the first run, the setup script will:
+1. Create necessary directories and set permissions
+2. Run database migrations
+3. Guide you through Telegram authentication
+4. Save your Telegram session for future use
+5. Start the bot in detached mode
+
+After initial setup, use these commands for daily operation:
 
 ### Docker Commands
 
-- View logs: `docker-compose logs -f`
-- Stop the bot: `docker-compose down`
-- Restart the bot: `docker-compose restart`
-- Check status: `docker-compose ps`
+- Start bot:  `docker compose up -d`
+- Stop bot:   `docker compose down`
+- View logs:  `docker compose logs -f`
+- Restart:    `docker compose restart`
+- Status:     `docker compose ps`
+
+### Important Notes
+
+- The Telegram session is saved in the `sessions` directory
+- DO NOT delete the `sessions` folder or its contents
+- The session persists across bot restarts and updates
+- To re-run setup, delete the `.setup_complete` file and run `setup.sh` again
 
 ### Docker Volumes
 
