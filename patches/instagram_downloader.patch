@@ -1,0 +1,26 @@
+# Patch for instagram_downloader.py
+# Apply these changes to your downloader class:
+
+# In the __init__ method, add:
+from ..core.resilience.smart_download import with_smart_download
+
+class InstagramDownloader:
+    def __init__(self, config: InstagramConfig, downloads_path: Path, cookies_file: Optional[Path] = None):
+        # ... existing init code ...
+        self._download_manager = None  # Will be initialized by decorator
+        
+    @with_smart_download()
+    async def download_post(self, url: str) -> List[Path]:
+        # ... existing download_post code ...
+        
+    @with_smart_download()
+    async def download_story(self, username: str) -> List[Path]:
+        # ... existing download_story code ...
+        
+    @with_smart_download()
+    async def download_highlight(self, highlight_id: str) -> List[Path]:
+        # ... existing download_highlight code ...
+        
+    @with_smart_download(batch=True)
+    async def download_content(self, url: str) -> List[Path]:
+        # ... existing download_content code ...

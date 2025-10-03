@@ -1,0 +1,16 @@
+[Unit]
+Description=Instagram Telegram Bot Service
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/workspaces/instagram
+ExecStart=/usr/bin/docker compose up
+ExecStop=/usr/bin/docker compose down
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

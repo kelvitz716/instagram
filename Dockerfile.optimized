@@ -1,0 +1,54 @@
+FROM python:3.12-slim AS builder
+
+# Set working directory
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create and activate virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy and install requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir gallery-dl yt-dlp
+
+# Final stage
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Create required directories with proper permissions
+RUN mkdir -p /app/downloads /app/data /app/sessions /app/uploads /app/temp && \
+    groupadd -g 1000 botuser && \
+    useradd -u 1000 -g botuser -s /bin/bash -m botuser && \
+    chown -R botuser:botuser /app && \
+    chmod -R 775 /app && \
+    chmod -R 777 /app/data /app/sessions && \
+    chmod g+s /app/data /app/sessions
+
+# Copy application
+COPY . .
+RUN chown -R botuser:botuser /app
+
+# Switch to non-root user
+USER botuser
+
+# Healthcheck
+COPY healthcheck.py .
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python healthcheck.py
+
+# Environment variable for Python path
+ENV PYTHONPATH=/app
+
+# Command to run the application
+CMD ["python", "bot.py"]

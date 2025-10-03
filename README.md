@@ -79,6 +79,33 @@ After initial setup, use these commands for daily operation:
 - The session persists across bot restarts and updates
 - To re-run setup, delete the `.setup_complete` file and run `setup.sh` again
 
+### Automatic Startup
+
+To configure the bot to start automatically on system boot:
+
+1. Copy the service file:
+```bash
+sudo cp instagram-bot.service /etc/systemd/system/instagram-bot@$USER.service
+```
+
+2. Reload systemd:
+```bash
+sudo systemctl daemon-reload
+```
+
+3. Enable and start the service:
+```bash
+sudo systemctl enable instagram-bot@$USER.service
+sudo systemctl start instagram-bot@$USER.service
+```
+
+4. Check status:
+```bash
+systemctl status instagram-bot@$USER.service
+```
+
+The bot will now automatically start when your system boots.
+
 ### Docker Volumes
 
 The bot uses Docker volumes to persist data:

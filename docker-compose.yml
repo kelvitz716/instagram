@@ -7,18 +7,34 @@ services:
     volumes:
       - ./downloads:/app/downloads
       - ./data:/app/data:rw
-      - ./sessions:/app/downloads/sessions:rw
+      - ./sessions:/app/sessions:rw
       - ./uploads:/app/uploads
       - ./temp:/app/temp
       - ./telegram:/app/telegram
       - ./gallery-dl-cookies.txt:/app/gallery-dl-cookies.txt:ro
       - ./.env:/app/.env:ro
+      - ./config:/app/config:ro
     user: "${UID:-1000}:${GID:-1000}"
     restart: unless-stopped
     environment:
       - TZ=UTC
       - PATH=/usr/local/bin:$PATH
       - PYTHONUNBUFFERED=1
+      # Performance tuning
+      - MAX_CONCURRENT_DOWNLOADS=3
+      - MAX_CONCURRENT_UPLOADS=3
+      - CACHE_TTL=3600
+      - CONNECTION_POOL_SIZE=10
+      - RATE_LIMIT_REQUESTS=30
+      - RATE_LIMIT_PERIOD=60
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.75'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
     healthcheck:
       test: ["CMD", "python", "healthcheck.py"]
       interval: 30s
@@ -26,3 +42,8 @@ services:
       retries: 3
       start_period: 5s
     init: true  # Handle signals properly
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

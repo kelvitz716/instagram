@@ -9,6 +9,7 @@ from datetime import datetime
 import subprocess
 from ..core.config import InstagramConfig
 from ..core.retry import RetryableOperation
+from ..core.resilience.smart_download import with_smart_download
 from ..core.session_manager import InstagramSessionManager, InstagramSessionError
 
 logger = logging.getLogger(__name__)
@@ -174,7 +175,7 @@ class InstagramDownloader:
         except Exception as e:
             raise InstagramDownloadError(f"Download failed: {str(e)}")
             
-    @RetryableOperation(max_retries=3, backoff_factor=20.0)
+    @with_smart_download()
     async def download_story(self, username: str) -> List[Path]:
         """Download a user's active stories"""
         try:
@@ -195,7 +196,7 @@ class InstagramDownloader:
         except Exception as e:
             raise InstagramDownloadError(f"Failed to download stories for {username}: {str(e)}")
             
-    @RetryableOperation(max_retries=3, backoff_factor=20.0)
+    @with_smart_download()
     async def download_highlight(self, highlight_id: str) -> List[Path]:
         """Download a highlight by its ID"""
         try:
@@ -216,7 +217,7 @@ class InstagramDownloader:
         except Exception as e:
             raise InstagramDownloadError(f"Failed to download highlight {highlight_id}: {str(e)}")
             
-    @RetryableOperation(max_retries=3, backoff_factor=20.0)
+    @with_smart_download()
     async def download_post(self, url: str) -> List[Path]:
         """
         Download content from an Instagram post URL
