@@ -400,7 +400,10 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         """Handle /cleanup command for manual media cleanup."""
         # Send initial status
         status_message = await update.message.reply_text(
-            "🧹 Starting cleanup of all media files..."
+            "🧹 CLEANUP OPERATION\n"
+            "==============================\n"
+            "⏳ Cleaning up media files...\n"
+            "This may take a moment."
         )
         
         try:
@@ -410,21 +413,35 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             if dirs_removed > 0:
                 await self._safe_edit_message(
                     status_message,
-                    f"✅ Cleanup complete!\n\n"
-                    f"• Removed {dirs_removed:,} directories\n"
-                    f"• Freed {bytes_freed/1024/1024:.1f} MB of space"
+                    "✨ CLEANUP COMPLETE\n"
+                    "==============================\n\n"
+                    "📊 CLEANUP RESULTS\n"
+                    "------------------------------\n"
+                    f"├─ 🗑️ Directories : ✅ {dirs_removed:,} removed\n"
+                    f"╰─ 💾 Space Freed : ✅ {bytes_freed/1024/1024:.1f} MB\n\n"
+                    "Your storage is now optimized! 🚀"
                 )
             else:
                 await self._safe_edit_message(
                     status_message,
-                    "✨ No media files to clean up!"
+                    "✨ CLEANUP STATUS\n"
+                    "==============================\n\n"
+                    "📊 STORAGE CHECK\n"
+                    "------------------------------\n"
+                    "✅ Storage is already clean!\n"
+                    "No media files need cleanup."
                 )
                 
         except Exception as e:
             logger.error(f"Cleanup failed: {e}")
             await self._safe_edit_message(
                 status_message,
-                f"❌ Error during cleanup: {str(e)}"
+                "⛔️ CLEANUP ERROR\n"
+                "==============================\n\n"
+                "❌ Operation Failed\n"
+                "------------------------------\n"
+                f"Error: {str(e)}\n\n"
+                "Please try again later."
             )
         
     def _extract_urls_from_text(self, text: str) -> List[str]:
@@ -486,7 +503,8 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         self.bot_app.add_handler(CommandHandler("stats", self.handle_stats))
         self.bot_app.add_handler(CommandHandler("cleanup", self.handle_cleanup))
         self.bot_app.add_handler(CommandHandler("metrics", metrics_command))
-        self.bot_app.add_handler(CommandHandler("telegram_status", self.    handle_telegram_session_status))
+        self.bot_app.add_handler(CommandHandler("telegram_status", self.handle_telegram_session_status))
+        self.bot_app.add_handler(CommandHandler("auth", self.handle_auth))
 
         # Session management handlers for Instagram
         self.bot_app.add_handler(CommandHandler("session_upload", self. handle_session_upload_start))
@@ -535,6 +553,7 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
     async def _create_new_telegram_session(self) -> Path:
         """Create a new Telegram session non-interactively using stored phone number."""
         import tempfile
+        from src.core.auth_exceptions import TelegramAuthenticationRequired
 
         if not self.config.telegram.phone_number:
             raise RuntimeError("Phone number not configured. Please add phone_number to telegram config.")
@@ -558,20 +577,55 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             async def phone_callback():
                 return phone_number
 
-            await temp_client.start(phone=phone_callback)
+            # Store the paths in our instance for the auth completion handler
+            self._auth_temp_session = {
+                'path': temp_session_path,
+                'name': temp_session_name,
+                'client': temp_client,
+                'phone': phone_number
+            }
 
-            # Get user info after successful auth
+            # This will trigger the code request but won't complete auth
+            await temp_client.connect()
+            await temp_client.send_code_request(phone_number)
+
+            # Raise an exception to indicate auth is needed
+            raise TelegramAuthenticationRequired(
+                "Telegram verification code required. Use /auth <code> to complete setup."
+            )
+
+        except TelegramAuthenticationRequired:
+            raise
+
+        except Exception as e:
+            logger.error(f"Failed to create Telegram session: {e}")
+            raise
+
+    async def complete_telegram_auth(self, code: str) -> Path:
+        """Complete the Telegram authentication process with the provided code."""
+        if not hasattr(self, '_auth_temp_session'):
+            raise RuntimeError("No authentication in progress. Please start over.")
+
+        try:
+            temp_data = self._auth_temp_session
+            temp_client = temp_data['client']
+            phone_number = temp_data['phone']
+
+            # Sign in with the provided code
+            await temp_client.sign_in(phone_number, code)
+
+            # Get user info
             me = await temp_client.get_me()
-            if me:
-                user_info = {
-                    "id": me.id,
-                    "first_name": me.first_name,
-                    "last_name": me.last_name,
-                    "username": me.username,
-                    "phone": phone_number
-                }
-            else:
+            if not me:
                 raise RuntimeError("Could not get user info after authentication")
+
+            user_info = {
+                "id": me.id,
+                "first_name": me.first_name,
+                "last_name": me.last_name,
+                "username": me.username,
+                "phone": phone_number
+            }
 
             logger.info(f"Authenticated as {me.first_name} ({phone_number})")
 
@@ -580,28 +634,76 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
 
             # Store the session permanently
             session_id = await self.telegram_session_storage.store_telegram_session(
-                temp_session_path,
+                temp_data['path'],
                 phone_number,
                 user_info
             )
 
             # Get the stored session path
             stored_path = self.telegram_session_storage.get_session_file_path()
-
             logger.info(f"Telegram session stored successfully with ID {session_id}")
+
+            # Clear the temporary session data
+            del self._auth_temp_session
+
             return stored_path
 
         except Exception as e:
-            logger.error(f"Failed to create Telegram session: {e}")
+            logger.error(f"Failed to complete Telegram authentication: {e}")
             raise
+
         finally:
             # Clean up temporary files
-            for temp_path in [temp_session_path, Path(f"{temp_session_name}.session")]:
-                if temp_path.exists():
-                    try:
-                        temp_path.unlink()
-                    except Exception:
-                        pass
+            try:
+                temp_path = self._auth_temp_session['path']
+                temp_name = self._auth_temp_session['name']
+                for path in [temp_path, Path(f"{temp_name}.session")]:
+                    if path.exists():
+                        try:
+                            path.unlink()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+    async def handle_auth(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /auth command to complete Telegram authentication."""
+        if not update.message:
+            return
+
+        if not context.args:
+            await update.message.reply_text(
+                "🔐 TELEGRAM AUTHENTICATION\n"
+                "==============================\n\n"
+                "❌ Missing Code\n"
+                "------------------------------\n"
+                "Please provide the verification code:\n"
+                "/auth <code>"
+            )
+            return
+
+        verification_code = context.args[0]
+
+        try:
+            await self.complete_telegram_auth(verification_code)
+            await update.message.reply_text(
+                "🔐 TELEGRAM AUTHENTICATION\n"
+                "==============================\n\n"
+                "✅ Authentication Complete!\n"
+                "------------------------------\n"
+                "Your Telegram session is now active.\n"
+                "You can use /telegram_status to verify."
+            )
+
+        except Exception as e:
+            await update.message.reply_text(
+                "🔐 TELEGRAM AUTHENTICATION\n"
+                "==============================\n\n"
+                "❌ Authentication Failed\n"
+                "------------------------------\n"
+                f"Error: {str(e)}\n\n"
+                "Please try again with /auth <code>"
+            )
 
     async def handle_telegram_session_status(self, update: Update, context:     ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /telegram_status command to show Telegram session status."""
@@ -610,8 +712,13 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
 
             if not session:
                 await update.message.reply_text(
-                    "❌ No active Telegram session found.\n"
-                    "This shouldn't happen if the bot is running properly."
+                    "⛔️ NO ACTIVE SESSION\n"
+                    "==============================\n\n"
+                    "❌ Session Error\n"
+                    "------------------------------\n"
+                    "No active Telegram session found.\n"
+                    "This should not occur during normal operation.\n"
+                    "Please check the bot's configuration."
                 )
                 return
 
@@ -642,7 +749,12 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         except Exception as e:
             logger.error(f"Failed to get session status: {e}")
             await update.message.reply_text(
-                "❌ Error retrieving session status. Check logs for details."
+                "⛔️ STATUS CHECK ERROR\n"
+                "==============================\n\n"
+                "❌ Operation Failed\n"
+                "------------------------------\n"
+                "Could not retrieve session status.\n"
+                "Please check the system logs for details."
             )
 
     async def _initialize_uploaders(self) -> None:
@@ -737,28 +849,46 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
     async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command with enhanced content type information."""
         await update.message.reply_text(
-            f"👋 Welcome to Instagram Downloader Bot v{BOT_VERSION}\n\n"
-            "🚀 **Auto-Detection Features:**\n"
-            "• 📷 Posts & Carousels\n"
-            "• 🎬 Reels & IGTV\n"
-            "• 📱 Stories (requires login)\n"
-            "• ⭐ Highlights (requires login)\n"
-            "• 👤 Profile detection\n\n"
-            "💡 **How to use:**\n"
-            "Simply paste any Instagram URL and I'll automatically detect and download the content!\n\n"
-            "📋 **Available commands:**\n"
-            "/instagram <url> - Download specific content\n"
-            "/detect <url> - Test URL detection\n"
-            "/stats - Show bot statistics\n"
-            "/metrics - Show detailed performance metrics (admin only)\n\n"
-            "⚡ **Supported URL formats:**\n"
-            "• instagram.com/p/... (posts)\n"
-            "• instagram.com/reel/... (reels)\n"
-            "• instagram.com/stories/... (stories)\n"
-            "• instagram.com/stories/highlights/... (highlights)\n"
-            "• instagram.com/username (profiles)\n"
-            "• instagram.com/tv/... (IGTV)\n\n"
-            "📝 **Note:** Story and highlight downloads require you to be logged into Instagram."
+            f"� WELCOME TO INSTAGRAM BOT v{BOT_VERSION}\n"
+            "==============================\n"
+            f"� {datetime.now().strftime('%b %d, %Y at %I:%M %p')}\n\n"
+
+            "🎯 QUICK START GUIDE\n"
+            "------------------------------\n"
+            "Simply paste any Instagram URL!\n"
+            "I'll handle the rest automatically.\n\n"
+
+            "📥 CONTENT DETECTION\n"
+            "------------------------------\n"
+            "├─ 📷 Posts & Carousels\n"
+            "├─ 🎬 Reels & IGTV\n"
+            "├─ 📱 Stories (requires login)\n"
+            "├─ ⭐ Highlights (requires login)\n"
+            "╰─ 👤 Profile scraping\n\n"
+
+            "⚡ SUPPORTED URLS\n"
+            "------------------------------\n"
+            "├─ instagram.com/p/... \n"
+            "├─ instagram.com/reel/...\n"
+            "├─ instagram.com/stories/...\n"
+            "├─ instagram.com/stories/highlights/...\n"
+            "├─ instagram.com/username\n"
+            "╰─ instagram.com/tv/...\n\n"
+
+            "�️ AVAILABLE COMMANDS\n"
+            "------------------------------\n"
+            "├─ /instagram <url> - Direct download\n"
+            "├─ /detect <url> - URL analysis\n"
+            "├─ /stats - View statistics\n"
+            "├─ /metrics - Performance data\n"
+            "├─ /cleanup - Clear cache\n"
+            "╰─ /help - Show full guide\n\n"
+
+            "⚠️ IMPORTANT NOTES\n"
+            "------------------------------\n"
+            "├─ Login required for Stories\n"
+            "├─ Login required for Highlights\n"
+            "╰─ Use /session_upload to login"
         )
 
     async def handle_detect_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -815,28 +945,84 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         # Get content type breakdown if available
         content_stats = await self.services.database_service.get_content_type_stats()
         
-        response = "📊 **Bot Statistics:**\n\n"
-        response += f"📥 **Downloads:**\n"
-        response += f"• Total Attempts: {stats.get('total_downloads', 0):,}\n"
-        response += f"• Successful: {stats.get('successful_downloads', 0):,}\n"
-        response += f"• Failed: {stats.get('failed_downloads', 0):,}\n\n"
+        from datetime import datetime
         
-        response += f"📁 **Files:**\n"
-        response += f"• Total Downloaded: {stats.get('total_files_downloaded', 0):,}\n"
-        response += f"• Successfully Uploaded: {stats.get('successful_file_uploads', 0):,}\n"
-        response += f"• Total Data: {stats.get('total_bytes_downloaded', 0)/1024/1024:.1f} MB\n\n"
+        response = (
+            "� DOWNLOAD STATISTICS REPORT\n"
+            "==============================\n"
+            f"📅 Report Time: {datetime.now().strftime('%b %d, %Y at %I:%M %p')}\n\n"
+            
+            "📥 DOWNLOAD METRICS\n"
+            "------------------------------\n"
+        )
+
+        # Calculate success rates and indicators
+        total_downloads = stats.get('total_downloads', 0)
+        successful_downloads = stats.get('successful_downloads', 0)
+        failed_downloads = stats.get('failed_downloads', 0)
+        success_rate = (successful_downloads / total_downloads * 100) if total_downloads > 0 else 0
+        download_status = "✅" if success_rate > 90 else "⚠️" if success_rate > 70 else "⛔️"
+
+        response += (
+            f"├─ 🎯 Success Rate: {download_status} {success_rate:.1f}%\n"
+            f"├─ ✅ Successful : {successful_downloads:,}\n"
+            f"├─ ❌ Failed    : {failed_downloads:,}\n"
+            f"╰─ 📊 Total     : {total_downloads:,}\n\n"
+            
+            "📁 FILE OPERATIONS\n"
+            "------------------------------\n"
+        )
+
+        # Calculate file metrics and status
+        total_files = stats.get('total_files_downloaded', 0)
+        successful_uploads = stats.get('successful_file_uploads', 0)
+        upload_rate = (successful_uploads / total_files * 100) if total_files > 0 else 0
+        upload_status = "✅" if upload_rate > 90 else "⚠️" if upload_rate > 70 else "⛔️"
         
+        total_data_mb = stats.get('total_bytes_downloaded', 0)/1024/1024
+        data_status = "✅" if total_data_mb < 1000 else "⚠️" if total_data_mb < 5000 else "⛔️"
+
+        response += (
+            f"├─ 📤 Upload Rate : {upload_status} {upload_rate:.1f}%\n"
+            f"├─ 💾 Total Files : {total_files:,}\n"
+            f"╰─ 📊 Data Volume : {data_status} {total_data_mb:.1f} MB\n\n"
+        )
+
         if content_stats:
-            response += f"📋 **Content Types:**\n"
+            response += (
+                "📋 CONTENT BREAKDOWN\n"
+                "------------------------------\n"
+            )
             for content_type, count in content_stats.items():
-                icon = {'post': '📷', 'reel': '🎬', 'story': '📱', 'highlight': '⭐', 'profile': '👤', 'tv': '📺'}.get(content_type, '📄')
-                response += f"• {icon} {content_type.title()}: {count:,}\n"
+                icon = {
+                    'post': '📷', 'reel': '🎬', 'story': '📱',
+                    'highlight': '⭐', 'profile': '👤', 'tv': '📺'
+                }.get(content_type, '📄')
+                is_last = content_type == list(content_stats.keys())[-1]
+                prefix = "╰─ " if is_last else "├─ "
+                response += f"{prefix}{icon} {content_type.title():8} : {count:,}\n"
             response += "\n"
+
+        # Storage section with indicators
+        current_size = storage_stats.get('total_size_mb', 0)
+        total_dirs = storage_stats.get('total_directories', 0)
+        old_dirs = storage_stats.get('old_directories', 0)
         
-        response += f"💾 **Storage:**\n"
-        response += f"• Current Size: {storage_stats.get('total_size_mb', 0):.1f} MB\n"
-        response += f"• Total Directories: {storage_stats.get('total_directories', 0):,}\n"
-        response += f"• Old Directories: {storage_stats.get('old_directories', 0):,}"
+        storage_status = "✅" if current_size < 500 else "⚠️" if current_size < 2000 else "⛔️"
+        dir_ratio = (old_dirs / total_dirs * 100) if total_dirs > 0 else 0
+        dir_status = "✅" if dir_ratio < 10 else "⚠️" if dir_ratio < 30 else "⛔️"
+
+        response += (
+            "💾 STORAGE STATUS\n"
+            "------------------------------\n"
+            f"├─ 📦 Current Size : {storage_status} {current_size:.1f} MB\n"
+            f"├─ 📂 Total Dirs   : {total_dirs:,}\n"
+            f"╰─ 🗑️ Old Dirs     : {dir_status} {old_dirs:,}\n\n"
+            
+            "------------------------------\n"
+            "📊 Status Indicators\n"
+            "✅ Normal | ⚠️ Warning | ⛔️ Critical"
+        )
         
         await update.message.reply_text(response, parse_mode='Markdown')
 

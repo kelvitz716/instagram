@@ -87,11 +87,14 @@ class SessionCommands:
                 )
                 return
                 
-            # Format session list
-            response = ["Your Instagram Sessions:"]
+            # Format session list with new aesthetic
+            now = datetime.now()
+            response = [
+                "🔐 INSTAGRAM SESSIONS\n"
+                "==============================\n"
+            ]
+            
             for session in sessions:
-                status = "✅ Active" if session['is_active'] else "⏸️ Inactive"
-                type_icon = "📁" if session['session_type'] == 'cookies_file' else "🦊"
                 expires = session['expires_at']
                 last_validated = session.get('last_validated')
 
@@ -101,18 +104,44 @@ class SessionCommands:
                 if isinstance(last_validated, str):
                     last_validated = datetime.fromisoformat(last_validated.replace('Z', '+00:00'))
 
-                expires_text = f"Expires: {expires:%Y-%m-%d}" if expires else "No expiration"
-                last_validated_text = (
-                    f"Last validated: {last_validated:%Y-%m-%d %H:%M}" 
-                    if last_validated else "Never validated"
-                )
+                # Calculate expiry status
+                if expires:
+                    days_left = (expires - now).days
+                    if days_left > 7:
+                        expiry_status = "✅"
+                    elif days_left > 0:
+                        expiry_status = "⚠️"
+                    else:
+                        expiry_status = "⛔️"
+                    expires_text = f"Expires in {days_left} days"
+                else:
+                    expiry_status = "ℹ️"
+                    expires_text = "No expiration"
+
+                # Calculate validation status
+                if last_validated:
+                    days_since = (now - last_validated).days
+                    if days_since < 1:
+                        validate_status = "✅"
+                    elif days_since < 7:
+                        validate_status = "⚠️"
+                    else:
+                        validate_status = "⛔️"
+                    last_validated_text = f"Validated {days_since}d ago"
+                else:
+                    validate_status = "⛔️"
+                    last_validated_text = "Never validated"
+
+                session_status = "✅ Active" if session['is_active'] else "⏸️ Inactive"
+                type_icon = "📁" if session['session_type'] == 'cookies_file' else "🦊"
                 
                 response.append(
-                    f"\n{type_icon} Session #{session['id']}\n"
-                    f"Status: {status}\n"
-                    f"Type: {session['session_type']}\n"
-                    f"{last_validated_text}\n"
-                    f"{expires_text}"
+                    f"\n📎 SESSION #{session['id']}\n"
+                    f"------------------------------\n"
+                    f"├─ 🔵 Status    : {session_status}\n"
+                    f"├─ 📂 Type      : {type_icon} {session['session_type']}\n"
+                    f"├─ 🔄 Validated : {validate_status} {last_validated_text}\n"
+                    f"╰─ ⏳ Expires   : {expiry_status} {expires_text}"
                 )
                 
             # Add action buttons

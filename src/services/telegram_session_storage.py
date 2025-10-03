@@ -150,6 +150,18 @@ class TelegramSessionStorage:
             logger.error(f"Failed to update session usage: {e}")
             return False
 
+    async def save_auth_state(self, phone_number: str, hash: str, phone_code_hash: str, next_step: str) -> None:
+        """Save authentication state for later use."""
+        await self.db.save_auth_state(phone_number, hash, phone_code_hash, next_step)
+
+    async def get_auth_state(self, phone_number: str) -> dict:
+        """Get authentication state for a phone number."""
+        return await self.db.get_auth_state(phone_number)
+
+    async def clear_auth_state(self, phone_number: str) -> None:
+        """Clear authentication state."""
+        await self.db.clear_auth_state(phone_number)
+
     async def validate_stored_session(self, api_id: int, api_hash: str) -> bool:
         """Validate that the stored session is still valid."""
         try:

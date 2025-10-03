@@ -13,33 +13,50 @@ class HelpCommandMixin:
         """Handle the /help command."""
         if not update.message:
             return
-            
+                
         help_text = (
-            "📸 Instagram Content Downloader Bot\n\n"
-            "Main Commands:\n"
-            "• Send any Instagram URL to download content\n"
-            "• /start - Start the bot\n"
-            "• /help - Show this help message\n"
-            "• /stats - View download statistics\n"
-            "• /cleanup - Clean up all downloaded media\n\n"
-            "Session Management:\n"
-            "• /session_upload - Upload a cookies.txt file\n"
-            "• /session_list - List and manage your sessions\n\n"
-            "Supported Content Types:\n"
-            "• Posts (single/multiple photos/videos)\n"
-            "• Reels\n"
-            "• Stories (requires login)\n"
-            "• Highlights (requires login)\n\n"
-            "Session Types:\n"
-            "1. Firefox Browser:\n"
-            "   - Uses cookies from your Firefox browser\n"
-            "   - Must be logged into Instagram in Firefox\n\n"
-            "2. Cookie File:\n"
-            "   - Upload a cookies.txt file\n"
-            "   - Export from Firefox using extensions:\n"
-            "     • 'Export Cookies'\n"
-            "     • 'Cookie Quick Manager'\n\n"
-            "For support: @kelvitz716"
-        )
+                "� INSTAGRAM DOWNLOADER HELP\n"
+                "==============================\n\n"
+                "🎯 QUICK START\n"
+                "------------------------------\n"
+                "• Simply paste any Instagram URL\n"
+                "• Bot will auto-detect and download\n\n"
+                
+                "📋 AVAILABLE COMMANDS\n"
+                "------------------------------\n"
+                "├─ 🚀 /start - Launch the bot\n"
+                "├─ 📖 /help - Show this guide\n"
+                "├─ 📊 /stats - View statistics\n"
+                "├─ 🧹 /cleanup - Clear downloads\n"
+                "├─ 📈 /metrics - Show performance\n"
+                "╰─ 🔄 /telegram_status - Check status\n\n"
+                
+                "🔑 SESSION MANAGEMENT\n"
+                "------------------------------\n"
+                "├─ 📤 /session_upload - Add cookies\n"
+                "╰─ 📋 /session_list - Manage sessions\n\n"
+                
+                "📥 SUPPORTED CONTENT\n"
+                "------------------------------\n"
+                "├─ 📷 Posts & Carousels\n"
+                "├─ 🎬 Reels & IGTV\n"
+                "├─ 📱 Stories (login required)\n"
+                "╰─ ⭐ Highlights (login required)\n\n"
+                
+                "🔐 SESSION OPTIONS\n"
+                "------------------------------\n"
+                "1️⃣ Firefox Browser\n"
+                "   • Use Firefox cookies\n"
+                "   • Must be logged in\n\n"
+                "2️⃣ Cookie File\n"
+                "   • Upload cookies.txt\n"
+                "   • Export via extensions:\n"
+                "     ├─ 'Export Cookies'\n"
+                "     ╰─ 'Cookie Quick Manager'\n\n"
+                
+                "ℹ️ SUPPORT\n"
+                "------------------------------\n"
+                "📞 Contact: @kelvitz716"
+            )
         
         await update.message.reply_text(help_text)

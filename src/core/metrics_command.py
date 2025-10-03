@@ -147,19 +147,26 @@ async def metrics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             name = sample.name.lower()
             value = sample.value
             
-            # Format system vitals
+            # Format system vitals with status indicators
             if 'cpu' in name:
-                system_metrics.append(f"├─ 🧠 CPU Usage    : `{value:.1f}s total`")
+                status = "⛔️" if value > 10 else "⚠️" if value > 5 else "✅"
+                system_metrics.append(f"├─ 🧠 CPU Usage    : {status} `{value:.1f}s total`")
             elif 'memory' in name and 'resident' in name:
-                memory_metrics.append(f"├─ 💾 Memory Used  : `{format_bytes(value)}`")
+                used_percent = (value / (1024 * 1024 * 1024)) * 100  # to GB percentage
+                status = "⛔️" if used_percent > 80 else "⚠️" if used_percent > 60 else "✅"
+                memory_metrics.append(f"├─ 💾 Memory Used  : {status} `{format_bytes(value)}`")
             elif 'memory' in name and 'virtual' in name:
-                memory_metrics.append(f"├─ 💽 Virtual Mem  : `{format_bytes(value)}`")
+                used_percent = (value / (1024 * 1024 * 1024)) * 100  # to GB percentage
+                status = "⛔️" if used_percent > 80 else "⚠️" if used_percent > 60 else "✅"
+                memory_metrics.append(f"├─ 💽 Virtual Mem  : {status} `{format_bytes(value)}`")
             elif 'fds' in name and 'open' in name:
-                system_metrics.append(f"├─ 📡 Open FDs    : `{int(value):,}`")
+                status = "⛔️" if value > 1000 else "⚠️" if value > 500 else "✅"
+                system_metrics.append(f"├─ 📡 Open FDs    : {status} `{int(value):,}`")
             elif 'start_time' in name:
                 import time
                 uptime = time.time() - value
-                system_metrics.append(f"╰─ ⏱️ Uptime      : `{format_uptime(uptime)}`")
+                status = "⚠️" if uptime > 7*24*3600 else "✅"  # Warning if up more than 7 days
+                system_metrics.append(f"╰─ ⏱️ Uptime      : {status} `{format_uptime(uptime)}`")
             
             # Get Python version info
             if 'python_info' in name:

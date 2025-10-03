@@ -3,8 +3,61 @@ import logging
 import asyncio
 import queue
 import threading
-from typing import Optional, List, Dict, Any, Tuple
-from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple    async def _create_telegram_sessions_table(self, conn):
+        """Create telegram sessions table if it doesn't exist."""
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS telegram_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_name TEXT NOT NULL,
+            session_file_path TEXT NOT NULL,
+            session_data TEXT NOT NULL,
+            phone_number TEXT NOT NULL,
+            is_active BOOLEAN DEFAULT TRUE,
+            expires_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """);
+        
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS telegram_auth_state (
+            phone_number TEXT PRIMARY KEY,
+            hash TEXT,
+            phone_code_hash TEXT,
+            next_step TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+        
+    async def save_auth_state(self, phone_number: str, hash: str, phone_code_hash: str, next_step: str) -> None:
+        """Save Telegram authentication state."""
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+            INSERT OR REPLACE INTO telegram_auth_state 
+            (phone_number, hash, phone_code_hash, next_step, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (phone_number, hash, phone_code_hash, next_step))
+
+    async def get_auth_state(self, phone_number: str) -> dict:
+        """Get current authentication state for a phone number."""
+        async with self._pool.acquire() as conn:
+            async with conn.execute(
+                "SELECT * FROM telegram_auth_state WHERE phone_number = ?",
+                (phone_number,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return dict(row)
+                return None
+
+    async def clear_auth_state(self, phone_number: str) -> None:
+        """Clear authentication state after successful login."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM telegram_auth_state WHERE phone_number = ?",
+                (phone_number,)
+            )mport Path
 from datetime import datetime
 from functools import lru_cache
 from collections import defaultdict
