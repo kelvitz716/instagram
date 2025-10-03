@@ -7,15 +7,18 @@ Supports posts, reels, stories, highlights, and profiles with optimized performa
 and service-based architecture.
 
 Features:
+- Service-based architecture with lifecycle management
 - Automatic URL detection and content type identification
 - Support for multiple Instagram content types
 - Optimized download and upload handling
 - Progress tracking and status updates
 - Database logging and statistics
 - Periodic cleanup of downloaded files
+- Enhanced error handling and recovery
+- Improved session management
 
 Author: @kelvitz716
-Version: 2.0.0
+Version: 3.0.0
 """
 
 # Standard library imports
@@ -217,9 +220,8 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
     
     Attributes:
         config (BotConfig): Bot configuration including API keys and settings
-        services (BotServices): Service container for all bot services
-        session_storage (SessionStorageService): Manages Instagram session storage
-        detector (ContentDetector): Instagram URL detection and parsing
+        service_manager (ServiceManager): Manages service lifecycles
+        url_service (URLDetectionService): URL detection and validation
         _cache (Dict[str, Any]): Internal cache for optimization
     """
 
@@ -668,41 +670,121 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
 
     async def handle_auth(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /auth command to complete Telegram authentication."""
-        if not update.message:
+        if not update.message or not update.effective_user:
             return
 
-        if not context.args:
+        # Only allow admin users to use this command
+        user_id = update.effective_user.id
+        if str(user_id) not in self.config.admin_user_ids:
             await update.message.reply_text(
-                "🔐 TELEGRAM AUTHENTICATION\n"
+                "⚠️ ACCESS DENIED\n"
                 "==============================\n\n"
-                "❌ Missing Code\n"
+                "❌ Error: Unauthorized Access\n"
                 "------------------------------\n"
-                "Please provide the verification code:\n"
-                "/auth <code>"
+                "This command is for admins only."
             )
             return
 
-        verification_code = context.args[0]
+        # Check command format
+        args = context.args
+        if not args:
+            await update.message.reply_text(
+                "🔐 TELEGRAM AUTHENTICATION\n"
+                "==============================\n\n"
+                "📱 Verification Code\n"
+                "------------------------------\n"
+                "Please provide the code you received:\n"
+                "/auth <code>\n\n"
+                "Example: /auth 12345"
+            )
+            return
+
+        code = args[0]
+        phone_number = self.config.telegram.phone_number.lstrip('+')
 
         try:
-            await self.complete_telegram_auth(verification_code)
-            await update.message.reply_text(
-                "🔐 TELEGRAM AUTHENTICATION\n"
-                "==============================\n\n"
-                "✅ Authentication Complete!\n"
-                "------------------------------\n"
-                "Your Telegram session is now active.\n"
-                "You can use /telegram_status to verify."
-            )
+            # Get current authentication state
+            auth_state = await self.telegram_session_storage.get_auth_state(phone_number)
+            if not auth_state:
+                await update.message.reply_text(
+                    "⚠️ AUTHENTICATION ERROR\n"
+                    "==============================\n\n"
+                    "❌ No Active Authentication\n"
+                    "------------------------------\n"
+                    "Please wait for a code request first."
+                )
+                return
+
+            # Create temporary session
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.session', delete=False) as temp_file:
+                temp_session_path = Path(temp_file.name)
+
+            try:
+                # Sign in with code
+                client = TelegramClient(
+                    str(temp_session_path),
+                    self.config.telegram.api_id,
+                    self.config.telegram.api_hash
+                )
+
+                await client.connect()
+                await client.sign_in(
+                    phone=phone_number,
+                    code=code,
+                    phone_code_hash=auth_state['phone_code_hash']
+                )
+
+                # Get user info
+                me = await client.get_me()
+                if not me:
+                    raise RuntimeError("Could not get user info after authentication")
+
+                user_info = {
+                    "id": me.id,
+                    "first_name": me.first_name,
+                    "last_name": me.last_name,
+                    "username": me.username,
+                    "phone": phone_number
+                }
+
+                await client.disconnect()
+
+                # Store the session permanently
+                session_id = await self.telegram_session_storage.store_telegram_session(
+                    temp_session_path,
+                    phone_number,
+                    user_info
+                )
+
+                # Clear authentication state
+                await self.telegram_session_storage.clear_auth_state(phone_number)
+
+                await update.message.reply_text(
+                    "✅ AUTHENTICATION SUCCESS\n"
+                    "==============================\n\n"
+                    "🔐 Session Status\n"
+                    "------------------------------\n"
+                    f"• 👤 User: {me.first_name}\n"
+                    f"• 📱 Phone: +{phone_number}\n"
+                    f"• 🔑 Session ID: {session_id}\n\n"
+                    "Bot is ready to use!"
+                )
+
+            finally:
+                # Clean up temporary files
+                if temp_session_path.exists():
+                    temp_session_path.unlink()
 
         except Exception as e:
+            logger.error(f"Authentication failed: {e}")
             await update.message.reply_text(
-                "🔐 TELEGRAM AUTHENTICATION\n"
+                "❌ AUTHENTICATION FAILED\n"
                 "==============================\n\n"
-                "❌ Authentication Failed\n"
+                "⚠️ Error Details\n"
                 "------------------------------\n"
                 f"Error: {str(e)}\n\n"
-                "Please try again with /auth <code>"
+                "Please try again or contact support."
             )
 
     async def handle_telegram_session_status(self, update: Update, context:     ContextTypes.DEFAULT_TYPE) -> None:
