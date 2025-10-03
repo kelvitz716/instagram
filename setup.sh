@@ -6,82 +6,109 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# Logging function
+log() {
+    local level=$1
+    shift
+    local message=$@
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    case "$level" in
+        "INFO")  echo -e "${GREEN}[$timestamp] [INFO] $message${NC}" ;;
+        "WARN")  echo -e "${YELLOW}[$timestamp] [WARN] $message${NC}" ;;
+        "ERROR") echo -e "${RED}[$timestamp] [ERROR] $message${NC}" ;;
+    esac
+}
+
+# Error handling
+set -e
+trap 'handle_error $? $LINENO $BASH_LINENO "$BASH_COMMAND" $(printf "::%s" ${FUNCNAME[@]:-})' ERR
+
+handle_error() {
+    local exit_code=$1
+    local line_no=$2
+    local bash_lineno=$3
+    local last_command=$4
+    local func_trace=$5
+    log "ERROR" "Command '$last_command' failed with exit code $exit_code at line $line_no"
+    log "ERROR" "Function trace: $func_trace"
+}
+
 # Check if setup has already been completed
 if [ -f ".setup_complete" ]; then
-    echo -e "${YELLOW}Setup has already been completed!${NC}"
-    echo -e "${YELLOW}If you need to run setup again, delete the .setup_complete file${NC}"
-    echo -e "\n${GREEN}=== Quick Reference Commands ===${NC}"
-    echo -e "Start bot:      docker compose up -d"
-    echo -e "Stop bot:       docker compose down"
-    echo -e "View logs:      docker compose logs -f"
-    echo -e "Restart bot:    docker compose restart"
-    echo -e "Check status:   docker compose ps"
+    log "WARN" "Setup has already been completed!"
+    log "WARN" "If you need to run setup again, delete the .setup_complete file"
+    log "INFO" "=== Quick Reference Commands ==="
+    log "INFO" "Start bot:      docker compose up -d"
+    log "INFO" "Stop bot:       docker compose down"
+    log "INFO" "View logs:      docker compose logs -f"
+    log "INFO" "Restart bot:    docker compose restart"
+    log "INFO" "Check status:   docker compose ps"
     exit 0
 fi
 
-echo -e "${YELLOW}Starting Instagram Telegram Bot Initial Setup...${NC}"
+log "INFO" "Starting Instagram Telegram Bot Initial Setup..."
 
 # --- Setup Docker Compose Command for Backward Compatibility ---
-
 DOCKER_COMPOSE_BIN=""
 
 if docker compose version &> /dev/null; then
     DOCKER_COMPOSE_BIN="docker compose"
-    echo -e "${GREEN}Using 'docker compose' (v2) syntax.${NC}"
+    log "INFO" "Using 'docker compose' (v2) syntax."
 elif command -v docker-compose &> /dev/null; then
     DOCKER_COMPOSE_BIN="docker-compose"
-    echo -e "${GREEN}Using 'docker-compose' (v1) syntax.${NC}"
+    log "INFO" "Using 'docker-compose' (v1) syntax."
 else
-    echo -e "${RED}Docker Compose is not installed. Please install Docker Compose first.${NC}"
+    log "ERROR" "Docker Compose is not installed. Please install Docker Compose first."
     exit 1
 fi
 
 if ! command -v docker &> /dev/null; then
-    echo -e "${RED}Docker is not installed. Please install Docker first.${NC}"
+    log "ERROR" "Docker is not installed. Please install Docker first."
     exit 1
 fi
 
 # Create all required directories with proper permissions
-echo -e "${YELLOW}Creating required directories...${NC}"
-mkdir -p downloads data/db sessions uploads temp telegram
+log "INFO" "Creating required directories..."
+mkdir -p downloads data/db sessions uploads temp telegram logs
 
 # Set proper permissions
 chmod -R 777 sessions data
-chmod 755 downloads uploads temp telegram
+chmod 755 downloads uploads temp telegram logs
 
 # Create database file
 touch data/bot_data.db
 chmod 666 data/bot_data.db
 
-echo -e "${GREEN}Created directory structure with proper permissions:${NC}"
-echo -e "  - downloads/: For downloaded media"
-echo -e "  - data/: For database and persistent data (chmod 777)"
-echo -e "  - sessions/: For Telegram session files (chmod 777)"
-echo -e "  - uploads/: For processed files ready to upload"
-echo -e "  - temp/: For temporary files"
-echo -e "  - telegram/: For Telegram-related files"
+log "INFO" "Created directory structure with proper permissions:"
+log "INFO" "  - downloads/: For downloaded media"
+log "INFO" "  - data/: For database and persistent data (chmod 777)"
+log "INFO" "  - sessions/: For Telegram session files (chmod 777)"
+log "INFO" "  - uploads/: For processed files ready to upload"
+log "INFO" "  - temp/: For temporary files"
+log "INFO" "  - telegram/: For Telegram-related files"
+log "INFO" "  - logs/: For application logs"
 
 # Run database migration
-echo -e "${YELLOW}Running database migrations...${NC}"
+log "INFO" "Running database migrations..."
 if [ -f "migrate.py" ]; then
     python3 migrate.py || {
-        echo -e "${RED}Database migration failed${NC}"
+        log "ERROR" "Database migration failed"
         exit 1
     }
-    echo -e "${GREEN}Database migrations completed${NC}"
+    log "INFO" "Database migrations completed"
 else
-    echo -e "${YELLOW}No migration script found, skipping...${NC}"
+    log "WARN" "No migration script found, skipping..."
 fi
 
 # Check for environment variables
-echo -e "${YELLOW}Checking configuration...${NC}"
+log "INFO" "Checking configuration..."
 if [ ! -f .env ]; then
-    echo -e "${RED}Error: .env file not found!${NC}"
-    echo -e "${YELLOW}Please create a .env file with the following variables:${NC}"
-    echo -e "BOT_TOKEN=your_bot_token"
-    echo -e "API_ID=your_api_id" 
-    echo -e "API_HASH=your_api_hash"
-    echo -e "TARGET_CHAT_ID=your_chat_id"
+    log "ERROR" "Error: .env file not found!"
+    log "WARN" "Please create a .env file with the following variables:"
+    echo "BOT_TOKEN=your_bot_token"
+    echo "API_ID=your_api_id" 
+    echo "API_HASH=your_api_hash"
+    echo "TARGET_CHAT_ID=your_chat_id"
     exit 1
 fi
 
@@ -101,80 +128,93 @@ for var in "${REQUIRED_VARS[@]}"; do
 done
 
 if [ ${#MISSING_VARS[@]} -ne 0 ]; then
-    echo -e "${RED}Error: Missing required environment variables:${NC}"
+    log "ERROR" "Missing required environment variables:"
     printf '%s\n' "${MISSING_VARS[@]}"
     exit 1
+fi
+
+# Copy optimized Dockerfile and docker-compose
+log "INFO" "Setting up optimized Docker configurations..."
+if [ -f "Dockerfile.new" ]; then
+    mv Dockerfile.new Dockerfile
+    log "INFO" "Updated Dockerfile with optimizations"
+fi
+
+if [ -f "docker-compose.yml.new" ]; then
+    mv docker-compose.yml.new docker-compose.yml
+    log "INFO" "Updated docker-compose.yml with optimizations"
 fi
 
 # Function to check if session exists and is valid
 check_session() {
     if [ -f "sessions/telegram_bot_session.session" ] && [ -s "sessions/telegram_bot_session.session" ]; then
-        echo -e "${GREEN}Valid Telegram session found!${NC}"
+        log "INFO" "Valid Telegram session found!"
         return 0
     else
-        echo -e "${YELLOW}No valid Telegram session found${NC}"
+        log "WARN" "No valid Telegram session found"
         return 1
     fi
 }
 
 # Main setup logic
-echo -e "${YELLOW}Building Docker containers...${NC}"
-$DOCKER_COMPOSE_BIN build --pull
+log "INFO" "Building Docker containers..."
+$DOCKER_COMPOSE_BIN build --pull --no-cache
 
 if [ $? -ne 0 ]; then
-    echo -e "${RED}Docker build failed. Please check your Dockerfile and try again.${NC}"
+    log "ERROR" "Docker build failed. Please check your Dockerfile and try again."
     exit 1
 fi
 
 # Run Telegram authentication
-echo -e "${YELLOW}Starting Telegram authentication process...${NC}"
+log "INFO" "Starting Telegram authentication process..."
 chmod +x telegram_auth.sh
 ./telegram_auth.sh
 
 if [ $? -ne 0 ]; then
-    echo -e "${RED}Telegram authentication failed. Please try again.${NC}"
+    log "ERROR" "Telegram authentication failed. Please try again."
     exit 1
 fi
 
 # Verify session file one last time
 if ! check_session; then
-    echo -e "${RED}Failed to verify Telegram session. Please run setup.sh again.${NC}"
+    log "ERROR" "Failed to verify Telegram session. Please run setup.sh again."
     exit 1
 fi
 
 # Start the bot in detached mode
-echo -e "${YELLOW}Starting bot in detached mode...${NC}"
+log "INFO" "Starting bot in detached mode..."
 $DOCKER_COMPOSE_BIN up -d
 
 # Create setup complete marker
 touch .setup_complete
 
-echo -e "${GREEN}=== Initial setup completed successfully! ===${NC}"
-echo -e "${GREEN}Bot is running with persistent Telegram sessions.${NC}"
+log "INFO" "=== Initial setup completed successfully! ==="
+log "INFO" "Bot is running with persistent Telegram sessions."
 
-echo -e "\n${GREEN}=== Setup Summary ===${NC}"
-echo -e "✅ Directories created with proper permissions"
-echo -e "✅ Database migrations applied" 
-echo -e "✅ Telegram authentication completed"
-echo -e "✅ Session file saved in sessions/telegram_bot_session.session"
-echo -e "✅ Docker containers built and started"
+log "INFO" "=== Setup Summary ==="
+log "INFO" "✅ Directories created with proper permissions"
+log "INFO" "✅ Database migrations applied" 
+log "INFO" "✅ Telegram authentication completed"
+log "INFO" "✅ Session file saved in sessions/telegram_bot_session.session"
+log "INFO" "✅ Docker containers built and started with optimizations"
 
-echo -e "\n${YELLOW}=== Important Information ===${NC}"
-echo -e "Your Telegram session is saved in: sessions/telegram_bot_session.session"
-echo -e "This file is crucial for authentication - DO NOT delete it!"
-echo -e "The sessions directory is persistent and will preserve your login"
+log "INFO" "=== Important Information ==="
+log "INFO" "Your Telegram session is saved in: sessions/telegram_bot_session.session"
+log "INFO" "This file is crucial for authentication - DO NOT delete it!"
+log "INFO" "The sessions directory is persistent and will preserve your login"
+log "INFO" "Logs are stored in the logs/ directory"
 
-echo -e "\n${GREEN}=== Daily Usage Commands ===${NC}"
-echo -e "Start bot:      $DOCKER_COMPOSE_BIN up -d"
-echo -e "Stop bot:       $DOCKER_COMPOSE_BIN down"
-echo -e "View logs:      $DOCKER_COMPOSE_BIN logs -f"
-echo -e "Restart bot:    $DOCKER_COMPOSE_BIN restart"
-echo -e "Check status:   $DOCKER_COMPOSE_BIN ps"
-echo -e "Check session:  Send /telegram_status to your bot"
+log "INFO" "=== Daily Usage Commands ==="
+log "INFO" "Start bot:      $DOCKER_COMPOSE_BIN up -d"
+log "INFO" "Stop bot:       $DOCKER_COMPOSE_BIN down"
+log "INFO" "View logs:      $DOCKER_COMPOSE_BIN logs -f"
+log "INFO" "Restart bot:    $DOCKER_COMPOSE_BIN restart"
+log "INFO" "Check status:   $DOCKER_COMPOSE_BIN ps"
+log "INFO" "Check session:  Send /telegram_status to your bot"
 
 # Show current status
-echo -e "\n${YELLOW}=== Current Status ===${NC}"
+log "INFO" "=== Current Status ==="
 $DOCKER_COMPOSE_BIN ps
 
-echo -e "\n${GREEN}Setup is complete! The bot will use the stored session for all future starts.${NC}"
-echo -e "${YELLOW}To run setup again in the future, delete the .setup_complete file${NC}"
+log "INFO" "Setup is complete! The bot will use the stored session for all future starts."
+log "WARN" "To run setup again in the future, delete the .setup_complete file"

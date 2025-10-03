@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   bot:
     build: 
@@ -7,7 +9,7 @@ services:
     volumes:
       - ./downloads:/app/downloads
       - ./data:/app/data:rw
-      - ./sessions:/app/sessions:rw
+      - ./sessions:/app/downloads/sessions:rw
       - ./uploads:/app/uploads
       - ./temp:/app/temp
       - ./telegram:/app/telegram
@@ -27,6 +29,10 @@ services:
       - CONNECTION_POOL_SIZE=10
       - RATE_LIMIT_REQUESTS=30
       - RATE_LIMIT_PERIOD=60
+      # Memory management
+      - PYTHONMALLOC=malloc
+      - MALLOC_TRIM_THRESHOLD_=65536
+      - MALLOC_ARENA_MAX=2
     deploy:
       resources:
         limits:
@@ -35,15 +41,25 @@ services:
         reservations:
           memory: 512M
           cpus: '0.25'
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     healthcheck:
       test: ["CMD", "python", "healthcheck.py"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 5s
-    init: true  # Handle signals properly
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+        tag: "{{.Name}}"
+        compress: "true"
+        labels: "production"
+        env: "production"
+    stop_grace_period: 30s

@@ -18,28 +18,32 @@ class TelegramSessionStorageError(Exception):
 class TelegramSessionStorage:
     """Manages storage and retrieval of Telegram bot sessions using the same pattern as Instagram sessions."""
 
-    def __init__(self, db_service: DatabaseService, sessions_path: Path):
+    def __init__(self, db_service: DatabaseService, sessions_path: Path, phone_number: Optional[str] = None):
         """Initialize the Telegram session storage service.
         
         Args:
             db_service: DatabaseService instance
             sessions_path: Path where session files will be stored
+            phone_number: Optional phone number for automated authentication
         """
         self.db = db_service
         self.sessions_path = sessions_path
         self.sessions_path.mkdir(parents=True, exist_ok=True)
+        self.phone_number = phone_number
         
         # Bot-specific session info (since this is for the bot itself, not users)
         self.bot_session_name = "telegram_bot_session"
 
     async def store_telegram_session(self, session_file_path: Path, 
-                                   phone_number: str, user_info: Dict[str, Any]) -> int:
+                                   phone_number: str, user_info: Dict[str, Any], 
+                                   make_active: bool = True) -> int:
         """Store a Telegram session in the database and file system.
         
         Args:
             session_file_path: Path to the .session file created by Telethon
             phone_number: Phone number used for authentication
             user_info: Information about the authenticated user
+            make_active: Whether to mark this session as active (default: True)
             
         Returns:
             int: Session record ID

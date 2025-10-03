@@ -436,10 +436,11 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
 
     async def _initialize_telegram(self) -> None:
         """Initialize Telegram clients with persistent session management."""
-        # Initialize session storage
+        # Initialize session storage with phone number
         self.telegram_session_storage = TelegramSessionStorage(
             self.services.database_service,
-            self.config.downloads_path / "sessions"
+            self.config.downloads_path / "sessions",
+            phone_number=self.config.telegram.phone_number
         )
 
         # Try to get existing session first
@@ -517,14 +518,18 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             return False
 
     async def _create_new_telegram_session(self) -> Path:
-        """Create a new Telegram session interactively and store it."""
+        """Create a new Telegram session non-interactively using stored phone number."""
         import tempfile
+
+        if not self.config.telegram.phone_number:
+            raise RuntimeError("Phone number not configured. Please add phone_number to telegram config.")
 
         # Create temporary session for initial login
         with tempfile.NamedTemporaryFile(suffix='.session', delete=False) as temp_file:
             temp_session_path = Path(temp_file.name)
 
         temp_session_name = str(temp_session_path).replace('.session', '')
+        phone_number = self.config.telegram.phone_number.lstrip('+')
 
         try:
             # Create temporary client for authentication
@@ -535,19 +540,23 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             )
 
             logger.info("Starting Telegram authentication...")
-            await temp_client.start()
+            async def phone_callback():
+                return phone_number
 
-            # Get user info
+            await temp_client.start(phone=phone_callback)
+
+            # Get user info after successful auth
             me = await temp_client.get_me()
-            phone_number = me.phone if me.phone else "unknown"
-
-            user_info = {
-                "id": me.id,
-                "first_name": me.first_name,
-                "last_name": me.last_name,
-                "username": me.username,
-                "phone": phone_number
-            }
+            if me:
+                user_info = {
+                    "id": me.id,
+                    "first_name": me.first_name,
+                    "last_name": me.last_name,
+                    "username": me.username,
+                    "phone": phone_number
+                }
+            else:
+                raise RuntimeError("Could not get user info after authentication")
 
             logger.info(f"Authenticated as {me.first_name} ({phone_number})")
 
