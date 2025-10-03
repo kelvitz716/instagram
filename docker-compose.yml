@@ -18,6 +18,8 @@ services:
       - ./config:/app/config:ro
     user: "${UID:-1000}:${GID:-1000}"
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
       - TZ=UTC
       - PATH=/usr/local/bin:$PATH

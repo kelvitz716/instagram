@@ -1,6 +1,12 @@
+import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List
 from pathlib import Path
+
+# Admin user IDs for bot commands
+admin_ids_str = os.getenv('ADMIN_USER_IDS', '')
+ADMIN_USER_IDS = [int(id.strip()) for id in admin_ids_str.split(',') if id.strip()]
+print(f"Loaded admin user IDs from environment: {ADMIN_USER_IDS} (from {admin_ids_str})")
 
 @dataclass
 class TelegramConfig:

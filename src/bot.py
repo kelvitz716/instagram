@@ -45,6 +45,7 @@ from telethon import TelegramClient
 from src.core.config import BotConfig
 from src.core.services import BotServices
 from src.core.resilience.retry import with_retry
+from src.core.metrics_command import metrics_command
 from src.core.resilience.circuit_breaker import with_circuit_breaker, ServiceUnavailableError
 from src.core.resilience.recovery import SessionRecovery, StateRecovery
 from src.core.help_command import HelpCommandMixin
@@ -484,6 +485,7 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         self.bot_app.add_handler(CommandHandler("help", self.handle_help))
         self.bot_app.add_handler(CommandHandler("stats", self.handle_stats))
         self.bot_app.add_handler(CommandHandler("cleanup", self.handle_cleanup))
+        self.bot_app.add_handler(CommandHandler("metrics", metrics_command))
         self.bot_app.add_handler(CommandHandler("telegram_status", self.    handle_telegram_session_status))
 
         # Session management handlers for Instagram
@@ -747,7 +749,8 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             "📋 **Available commands:**\n"
             "/instagram <url> - Download specific content\n"
             "/detect <url> - Test URL detection\n"
-            "/stats - Show bot statistics\n\n"
+            "/stats - Show bot statistics\n"
+            "/metrics - Show detailed performance metrics (admin only)\n\n"
             "⚡ **Supported URL formats:**\n"
             "• instagram.com/p/... (posts)\n"
             "• instagram.com/reel/... (reels)\n"

@@ -5,6 +5,11 @@ rich>=13.6.0
 pydantic>=2.4.2
 pydantic-settings>=2.0.3
 python-telegram-bot[job-queue]>=20.6
+prometheus-client>=0.19.0
+orjson>=3.9.10
+opentelemetry-api>=1.21.0
+opentelemetry-sdk>=1.21.0
+opentelemetry-instrumentation>=0.42b0
 
 # Telegram
 telethon>=1.31.0

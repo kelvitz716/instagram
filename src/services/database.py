@@ -646,6 +646,12 @@ class DatabaseService:
         finally:
             self._pool.release(conn)
             
+    async def get_pool_size(self) -> int:
+        """Get the current size of the connection pool."""
+        if not self._pool:
+            return 0
+        return self._pool.max_connections - self._pool._pool.qsize()
+
     async def get_content_type_stats(self) -> Dict[str, int]:
         """Get download statistics broken down by content type.
         
