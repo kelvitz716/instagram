@@ -8,59 +8,6 @@ and service-based architecture.
 """
 
 # Standard library imports
-import logging
-
-# Configure logger
-logger = logging.getLogger(__name__)
-import sys
-import time
-import tempfile
-from datetime import datetime
-from functools import lru_cache
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
-
-# Third-party imports
-import structlog
-from rich.console import Console
-from telegram import Message, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, error as telegram_error
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ConversationHandler, filters, ContextTypes
-)
-from telethon import TelegramClient
-from telethon import errors as telethon_errors
-
-# Core imports
-from src.core.config import BotConfig
-from src.core.services import BotServices 
-from src.core.session_commands import SessionCommands
-from src.core.help_command import HelpCommandMixin
-
-# Additional imports for missing symbols
-from src.core.session_manager import InstagramSessionManager
-from src.core.resilience.recovery import SessionRecovery, StateRecovery
-from src.services.database import DatabaseService
-from src.services.session_storage import SessionStorageService
-from src.services.telegram_session_storage import TelegramSessionStorage
-from src.services.instagram_downloader import InstagramDownloader
-from src.services.bot_api_uploader import BotAPIUploader
-from src.services.telethon_uploader import TelethonUploader
-from src.services.progress import ProgressTracker
-from src.services.cleanup import CleanupService
-from src.core.metrics_command import metrics_command
-from src.core.retry import with_retry
-from src.core.resilience.circuit_breaker import with_circuit_breaker
-from src.core.constants import URL_PATTERN, CONTENT_ICONS
-from src.core.monitoring.logging import setup_structured_logging
-
-# Auth states
-from src.core.telethon_auth_command import LOGIN_OTP, LOGIN_PASSWORD
-
-# Configure logger
-logger = logging.getLogger(__name__)
-
-# Standard library imports
 import asyncio
 import json
 import logging
@@ -94,8 +41,23 @@ from src.core.resilience.retry import with_retry
 from src.core.metrics_command import metrics_command
 from src.core.resilience.circuit_breaker import with_circuit_breaker, ServiceUnavailableError
 from src.core.resilience.recovery import SessionRecovery, StateRecovery
-from src.core.telethon_auth_command import TelethonAuthCommand
+from src.core.telethon_auth_command import TelethonAuthCommand, LOGIN_OTP, LOGIN_PASSWORD
 from src.core.session_manager import InstagramSessionManager
+from src.core.constants import URL_PATTERN, CONTENT_ICONS
+from src.core.monitoring.logging import setup_structured_logging
+
+# Services
+from src.services.database import DatabaseService
+from src.services.session_storage import SessionStorageService
+from src.services.telegram_session_storage import TelegramSessionStorage
+from src.services.instagram_downloader import InstagramDownloader
+from src.services.bot_api_uploader import BotAPIUploader
+from src.services.telethon_uploader import TelethonUploader
+from src.services.progress import ProgressTracker
+from src.services.cleanup import CleanupService
+
+# Configure logger
+logger = logging.getLogger(__name__)
 
 # Service imports
 from src.services.database import DatabaseService
@@ -155,6 +117,7 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
         self.session_manager = InstagramSessionManager(downloads_path=config.instagram.downloads_path)
         self.session_recovery = SessionRecovery(services=self.services)
         self.state_recovery = StateRecovery(services=self.services)
+        self.session_commands = SessionCommands(session_manager=self.session_manager, services=self.services)
         # Initialize bot application
         self.bot_app = Application.builder().token(config.telegram.bot_token).build()
         # Initialize services
@@ -175,14 +138,17 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
     def _setup_handlers(self):
         # Configure bot command and message handlers
         # Add command handlers
+        # Add command handlers with bot username for group chats
         self.bot_app.add_handler(CommandHandler("start", self._start_command))
         self.bot_app.add_handler(CommandHandler("help", self.handle_help))
         self.bot_app.add_handler(CommandHandler("metrics", metrics_command))
         self.bot_app.add_handler(CommandHandler("cleanup", self._cleanup_command))
         self.bot_app.add_handler(CommandHandler("stats", self._stats_command))
         self.bot_app.add_handler(CommandHandler("telegram_status", self._telegram_status_command))
-        self.bot_app.add_handler(CommandHandler("session_list", self._session_list_command))
-        self.bot_app.add_handler(CommandHandler("session_upload", self._session_upload_command))
+        # Session management commands
+        self.bot_app.add_handler(CommandHandler("session", self._session_command))
+        self.bot_app.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND, self._session_command))
+        self.bot_app.add_handler(CallbackQueryHandler(self.handle_session_button))
         
         # Add conversation handler for authentication
         auth_handler = ConversationHandler(
@@ -343,26 +309,32 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             await query.message.edit_text("Sorry, something went wrong.")
             
     async def _handle_auth_callback(self, query: CallbackQuery, data: str):
-    # Handle authentication-related callbacks
+        """Handle authentication callbacks."""
+        pass
+        
+    async def _telegram_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /telegram_status command."""
         try:
-            if data == 'start':
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Login with Password", callback_data='auth:password')],
-                    [InlineKeyboardButton("Cancel", callback_data='cancel')]
-                ])
-                await query.message.edit_text(
-                    "Please choose login method:",
-                    reply_markup=keyboard
-                )
-            elif data == 'password':
-                # Start password authentication flow
-                await query.message.edit_text(
-                    "Please enter your Instagram password:"
-                )
-                return LOGIN_PASSWORD
+            response = await context.bot.get_me()
+            await update.message.reply_text(
+                "📡 *Bot Status*\n\n"
+                f"Bot API: ✅ Connected\n"
+                f"Username: @{response.username}",
+                parse_mode='Markdown'
+            )
         except Exception as e:
-            logger.error(f"Auth callback error: {e}", exc_info=True)
-            await query.message.edit_text("Authentication failed. Please try again.")
+            logger.error("Telegram status check failed", exc_info=e)
+            await update.message.reply_text("❌ Bot status check failed")
+            
+    async def _session_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /session command and file uploads."""
+        try:
+            await self.session_commands.handle_session(update, context)
+        except Exception as e:
+            logger.error("Session command error", exc_info=e)
+            await update.message.reply_text(
+                "❌ An error occurred while processing your request. Please try again."
+            )
             
     async def _auth_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Handle /auth command to start authentication process
@@ -545,52 +517,51 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
     async def _telegram_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /telegram_status command."""
         try:
-            telethon_uploader = self.services.get(TelethonUploader)
-            if not telethon_uploader:
-                await update.message.reply_text("Telegram service not available.")
-                return
-                
-            is_authorized = await telethon_uploader.is_authorized()
-            status = "✅ Authorized" if is_authorized else "❌ Not authorized"
+            # Check basic bot connectivity
+            response = await context.bot.get_me()
             
-            await update.message.reply_text(
-                f"📡 TELEGRAM STATUS\n\n"
-                f"Authorization: {status}\n"
-                f"Large File Upload: {'✅ Available' if is_authorized else '❌ Not available'}\n"
-                f"Bot API: ✅ Connected"
+            # Check Telethon client if available
+            telethon_status = "✅ Available"
+            if hasattr(self, 'telethon_client'):
+                try:
+                    telethon_connected = await self.telethon_client.is_connected()
+                    telethon_status = "✅ Connected" if telethon_connected else "❌ Not Connected"
+                except:
+                    telethon_status = "❌ Error"
+            else:
+                telethon_status = "⚠️ Not Configured"
+            
+            # Send status message
+            status_text = (
+                "📡 *Bot Status*\n\n"
+                f"Bot API: ✅ Connected\n"
+                f"Username: @{response.username}\n"
+                f"Large File Upload: {telethon_status}"
             )
+            await update.message.reply_text(status_text, parse_mode='Markdown')
         except Exception as e:
-            logger.error("Telegram status error", exc_info=e)
-            await update.message.reply_text(f"Error checking Telegram status: {str(e)}")
+            logger.error("Telegram status check failed", exc_info=e)
+            await update.message.reply_text("❌ Bot status check failed")
+            
+    async def _session_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /session command and file uploads."""
+        try:
+            await self.session_commands.handle_session(update, context)
+        except Exception as e:
+            logger.error("Session command error", exc_info=e)
+            await update.message.reply_text(
+                "❌ An error occurred while processing your request. Please try again."
+            )
 
     async def _session_list_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /session_list command."""
         try:
-            session_manager = self.session_manager
-            session_valid = await session_manager.is_valid()
-            
-            await update.message.reply_text(
-                f"🔑 SESSION STATUS\n\n"
-                f"Current Session: {'✅ Valid' if session_valid else '❌ Invalid'}\n"
-                f"Last Refresh: {session_manager.last_refresh_time if hasattr(session_manager, 'last_refresh_time') else 'Never'}\n"
-                f"\nUse /session_upload to update session."
-            )
+            await self.session_commands.handle_session_list(update, context)
         except Exception as e:
             logger.error("Session list error", exc_info=e)
-            await update.message.reply_text(f"Error listing sessions: {str(e)}")
-
-    async def _session_upload_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /session_upload command."""
-        await update.message.reply_text(
-            "📤 UPLOAD SESSION\n\n"
-            "To upload a new session:\n\n"
-            "1. Export cookies from browser:\n"
-            "   - Install 'Cookie Quick Manager' or\n"
-            "   - Install 'Export Cookies' extension\n\n"
-            "2. Save as Netscape format file\n\n"
-            "3. Upload file here with caption /session\n\n"
-            "Note: Must be logged into Instagram!"
-        )
+            await update.message.reply_text(
+                "❌ An error occurred while checking session status. Please try again."
+            )
 
 # Instagram URL constants
 BASE_INSTAGRAM = r'(?:https?://)?(?:www\.)?'

@@ -356,3 +356,20 @@ class InstagramSessionManager:
             return True
         except InstagramSessionError:
             return False
+            
+    async def clear_session(self) -> None:
+        """Clear the current session data and remove cookies."""
+        try:
+            # Clear memory state
+            self._session_cookies.clear()
+            self._is_valid = False
+            self._last_cookie_refresh = None
+            
+            # Remove cookies file if it exists
+            if self.cookies_file and self.cookies_file.exists():
+                self.cookies_file.unlink()
+            
+            logger.info("Session cleared successfully")
+        except Exception as e:
+            logger.error(f"Error clearing session: {e}")
+            raise InstagramSessionError(f"Failed to clear session: {e}")

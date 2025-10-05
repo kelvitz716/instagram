@@ -1,6 +1,7 @@
 """Session management commands for the Instagram bot."""
 
-from typing import Optional, List
+from typing import Optional, List, Any
+import asyncio
 import logging
 import json
 from pathlib import Path
@@ -15,29 +16,38 @@ logger = logging.getLogger(__name__)
 class SessionCommands:
     """Mixin class for session management commands."""
     
-    async def handle_session_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle the /session command and cookie file uploads."""
+    def __init__(self, session_manager: InstagramSessionManager, services: Any):
+        self.session_manager = session_manager
+        self.services = services
+    
+    async def handle_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Interactive session management command."""
         if not update.message or not update.effective_user:
             return
 
-        # Check if this is just the command without a file
+        # Get current session status
+        is_valid = await self.session_manager.is_valid()
+        
         if not update.message.document:
-            keyboard = [
-                [InlineKeyboardButton("📤 Upload Cookies", callback_data="upload_cookies")],
-                [InlineKeyboardButton("📋 List Sessions", callback_data="list_sessions")],
-                [InlineKeyboardButton("ℹ️ Check Status", callback_data="check_status")]
-            ]
+            # Show different options based on session status
+            if is_valid:
+                keyboard = [
+                    [InlineKeyboardButton("✅ Check Status", callback_data="check_status")],
+                    [InlineKeyboardButton("🔄 Update Session", callback_data="upload_cookies")],
+                    [InlineKeyboardButton("❌ Logout", callback_data="logout")]
+                ]
+                status = "🟢 *Active*"
+            else:
+                keyboard = [
+                    [InlineKeyboardButton("🔑 Login with Cookies", callback_data="upload_cookies")],
+                    [InlineKeyboardButton("❓ How to Get Cookies", callback_data="cookie_help")]
+                ]
+                status = "🔴 *Not Logged In*"
             
             await update.message.reply_text(
-                "🔐 *Instagram Session Management*\n\n"
-                "What would you like to do?\n\n"
-                "• *Upload* new cookies file\n"
-                "• *List* your active sessions\n"
-                "• *Check* session status\n\n"
-                "_To upload cookies, you can export them from browsers using:_\n"
-                "• Export Cookies (Firefox)\n"
-                "• Cookie Quick Manager\n"
-                "• EditThisCookie (Chrome)",
+                "🔐 *Instagram Session Manager*\n\n"
+                f"Current Status: {status}\n\n"
+                "Select an option below to manage your Instagram login.",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode='Markdown'
             )
@@ -76,7 +86,7 @@ class SessionCommands:
             
             # Try loading and validating the cookies
             try:
-                session = self.session_manager.load_cookies_from_file(temp_path)
+                session = await self.session_manager.load_cookies_from_file(temp_path)
                 if not session or not all(cookie in session for cookie in ['sessionid', 'csrftoken']):
                     raise ValueError("Missing required cookies (sessionid and csrftoken)")
                     
@@ -225,7 +235,7 @@ class SessionCommands:
             )
     
     async def handle_session_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle session management button clicks."""
+        """Handle interactive session management buttons."""
         if not update.callback_query or not update.effective_user:
             return
             
@@ -233,22 +243,85 @@ class SessionCommands:
         await query.answer()
         
         try:
-            if query.data.startswith("activate_session_"):
-                session_id = int(query.data.split("_")[-1])
-                if await self.session_storage.set_active_session(update.effective_user.id, session_id):
-                    await query.edit_message_text(
-                        f"✅ Session #{session_id} is now active.\n"
-                        "It will be used for future downloads."
-                    )
-                else:
-                    await query.edit_message_text("❌ Failed to activate session.")
-                    
-            elif query.data.startswith("delete_session_"):
-                session_id = int(query.data.split("_")[-1])
-                if await self.session_storage.delete_session(update.effective_user.id, session_id):
-                    await query.edit_message_text(f"✅ Session #{session_id} has been deleted.")
-                else:
-                    await query.edit_message_text("❌ Failed to delete session.")
+            if query.data == "upload_cookies":
+                await query.edit_message_text(
+                    "📤 *Upload Your Instagram Cookies*\n\n"
+                    "1️⃣ Login to Instagram in your browser\n"
+                    "2️⃣ Install a cookie exporter extension:\n"
+                    "   • Firefox: 'Export Cookies'\n"
+                    "   • Chrome: 'EditThisCookie'\n\n"
+                    "3️⃣ Export cookies as Netscape format\n"
+                    "4️⃣ Send the cookies.txt file here\n\n"
+                    "_Just upload the file - I'll guide you through the rest!_",
+                    parse_mode='Markdown'
+                )
+                
+            elif query.data == "cookie_help":
+                keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_to_main")]]
+                await query.edit_message_text(
+                    "❓ *How to Get Instagram Cookies*\n\n"
+                    "*Chrome Users:*\n"
+                    "1. Install 'EditThisCookie' extension\n"
+                    "2. Go to instagram.com and login\n"
+                    "3. Click extension icon → Export\n"
+                    "4. Save as cookies.txt\n\n"
+                    "*Firefox Users:*\n"
+                    "1. Install 'Export Cookies' extension\n"
+                    "2. Go to instagram.com and login\n"
+                    "3. Right-click → Export Cookies\n"
+                    "4. Choose Netscape format\n\n"
+                    "_Need help? Contact @kelvitz716_",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
+                )
+                
+            elif query.data == "check_status":
+                is_valid = await self.session_manager.is_valid()
+                last_refresh = self.session_manager.last_refresh_time
+                refresh_age = datetime.now() - last_refresh if last_refresh else None
+                
+                status_text = "🔐 *Session Status*\n\n"
+                status_text += "Status: ✅ Active\n" if is_valid else "Status: ❌ Invalid\n"
+                if refresh_age:
+                    status_text += f"Last Verified: {refresh_age.seconds // 60} minutes ago\n"
+                
+                keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_to_main")]]
+                await query.edit_message_text(
+                    status_text,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
+                )
+                
+            elif query.data == "logout":
+                keyboard = [
+                    [
+                        InlineKeyboardButton("✅ Yes", callback_data="confirm_logout"),
+                        InlineKeyboardButton("❌ No", callback_data="back_to_main")
+                    ]
+                ]
+                await query.edit_message_text(
+                    "❗ *Confirm Logout*\n\n"
+                    "Are you sure you want to logout?\n"
+                    "This will delete your current session.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
+                )
+                
+            elif query.data == "confirm_logout":
+                # Clear session
+                await self.session_manager.clear_session()
+                keyboard = [[InlineKeyboardButton("🔑 Login Again", callback_data="upload_cookies")]]
+                await query.edit_message_text(
+                    "✅ *Logged Out Successfully*\n\n"
+                    "Your Instagram session has been removed.\n"
+                    "Click below to login again when ready.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
+                )
+                
+            elif query.data == "back_to_main":
+                # Return to main session menu
+                await self.handle_session(update, context)
                     
         except Exception as e:
             logger.error(f"Failed to handle session button: {e}")
@@ -328,6 +401,10 @@ class SessionCommands:
             temp_dest.write_text(cookies_content)
             temp_dest.chmod(0o644)  # Set proper permissions
             temp_dest.rename(cookies_dst)
+            
+            # Wait for file to be fully available
+            while not cookies_dst.exists():
+                await asyncio.sleep(0.1)
             
             await update.message.reply_text(
                 "✅ Cookie file processed and activated successfully!\n"

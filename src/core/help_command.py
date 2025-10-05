@@ -15,7 +15,7 @@ class HelpCommandMixin:
             return
                 
         help_text = (
-                "� INSTAGRAM DOWNLOADER HELP\n"
+                "📱 INSTAGRAM DOWNLOADER HELP\n"
                 "==============================\n\n"
                 "🎯 QUICK START\n"
                 "------------------------------\n"
@@ -33,8 +33,7 @@ class HelpCommandMixin:
                 
                 "🔑 SESSION MANAGEMENT\n"
                 "------------------------------\n"
-                "├─ 📤 /session_upload - Add cookies\n"
-                "╰─ 📋 /session_list - Manage sessions\n\n"
+                "╰─ 🔐 /session - Manage Instagram Login\n\n"
                 
                 "📥 SUPPORTED CONTENT\n"
                 "------------------------------\n"
