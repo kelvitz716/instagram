@@ -12,42 +12,65 @@ class ServiceManager:
     """Manages initialization and cleanup of bot services."""
     
     def __init__(self):
+        """Initialize the service manager."""
         self._services: Dict[str, BaseService] = {}
         self._initialized = False
+        self._startup_order = [
+            'database',
+            'session_storage',
+            'telegram',
+            'instagram',
+            'uploader'
+        ]
     
     def register(self, name: str, service: BaseService) -> None:
-        """Register a service with the manager."""
+        """
+        Register a service with the manager.
+        
+        Args:
+            name: Unique identifier for the service
+            service: Service instance implementing BaseService
+        
+        Raises:
+            ConfigurationError: If service name already registered
+        """
         if name in self._services:
             raise ConfigurationError(f"Service {name} already registered")
         self._services[name] = service
     
-    async def initialize_all(self, ordered_names: list[str] = None) -> None:
+    async def initialize_all(self) -> None:
         """
-        Initialize all services in order.
+        Initialize all services in predefined order.
         
-        Args:
-            ordered_names: Optional list of service names specifying initialization order.
-                         Services not in the list will be initialized last in arbitrary order.
+        The initialization order is defined by self._startup_order.
+        Services not in the startup order are initialized last.
+        
+        Raises:
+            ConfigurationError: If a required service is missing
         """
         if self._initialized:
             return
             
-        to_initialize = set(self._services.keys())
-        
+        # Validate required services
+        missing = [name for name in self._startup_order 
+                  if name not in self._services]
+        if missing:
+            raise ConfigurationError(f"Required services missing: {', '.join(missing)}")
+            
         # Initialize ordered services first
-        if ordered_names:
-            for name in ordered_names:
-                if name in self._services and name in to_initialize:
-                    await self._initialize_service(name)
-                    to_initialize.remove(name)
+        for name in self._startup_order:
+            if name in self._services:
+                await self._initialize_service(name)
         
-        # Initialize remaining services
-        for name in list(to_initialize):
+        # Initialize any remaining services
+        remaining = set(self._services.keys()) - set(self._startup_order)
+        for name in remaining:
             await self._initialize_service(name)
         
         self._initialized = True
     
     async def _initialize_service(self, name: str) -> None:
+        """Initialize a single service by name."""
         """Initialize a single service with error handling."""
         service = self._services[name]
         try:

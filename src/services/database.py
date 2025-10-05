@@ -90,7 +90,7 @@ class DatabaseService:
     
     def __init__(self, config: DatabaseConfig):
         self.config = config
-        self.db_path = Path(config.db_path)
+        self.db_path = config.path  # Already a Path object
         self._pool = None
         self._prepared_statements: Dict[str, str] = {}
         self._stats_cache: Dict[str, Tuple[Any, float]] = {}

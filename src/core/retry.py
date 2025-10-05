@@ -5,6 +5,25 @@ from typing import Type, Union, Optional, List, Callable, Any
 
 logger = logging.getLogger(__name__)
 
+def with_retry(max_retries: int = 3):
+    """Decorator for retrying operations with exponential backoff."""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f"Max retries ({max_retries}) exceeded", exc_info=True)
+                        raise
+                    wait_time = (2 ** attempt) + (asyncio.get_event_loop().time() % 1)
+                    logger.warning(f"Retry {attempt + 1}/{max_retries} after {wait_time:.1f}s: {str(e)}")
+                    await asyncio.sleep(wait_time)
+            return None
+        return wrapper
+    return decorator
+
 class MaxRetriesExceeded(Exception):
     """Raised when maximum retries are exceeded"""
     pass

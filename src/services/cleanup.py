@@ -3,6 +3,7 @@
 import os
 import logging
 import shutil
+import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -14,6 +15,24 @@ class CleanupService:
     def __init__(self, downloads_path: str, max_age_days: int = 2):
         self.downloads_path = Path(downloads_path)
         self.max_age_days = max_age_days
+        
+    def schedule_cleanup(self, scheduler=None):
+        """Schedule periodic cleanup task."""
+        if not scheduler:
+            logger.warning("No scheduler provided for cleanup service")
+            return
+            
+        # Schedule cleanup job using job_queue from python-telegram-bot
+        async def cleanup_callback(context):
+            await asyncio.to_thread(self.cleanup_old_directories)
+            
+        scheduler.job_queue.run_repeating(
+            callback=cleanup_callback,
+            interval=21600,  # 6 hours in seconds
+            first=10,  # Start first run after 10 seconds
+            name='cleanup_downloads'
+        )
+        logger.info("Scheduled periodic cleanup every 6 hours")
         
     def is_directory_old(self, dir_path: Path) -> bool:
         """Check if a directory is older than max_age_days."""

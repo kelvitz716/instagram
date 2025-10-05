@@ -145,16 +145,6 @@ if [ -f "docker-compose.yml.new" ]; then
     log "INFO" "Updated docker-compose.yml with optimizations"
 fi
 
-# Function to check if session exists and is valid
-check_session() {
-    if [ -f "sessions/telegram_bot_session.session" ] && [ -s "sessions/telegram_bot_session.session" ]; then
-        log "INFO" "Valid Telegram session found!"
-        return 0
-    else
-        log "WARN" "No valid Telegram session found"
-        return 1
-    fi
-}
 
 # Main setup logic
 log "INFO" "Building Docker containers..."
@@ -162,22 +152,6 @@ $DOCKER_COMPOSE_BIN build --pull --no-cache
 
 if [ $? -ne 0 ]; then
     log "ERROR" "Docker build failed. Please check your Dockerfile and try again."
-    exit 1
-fi
-
-# Run Telegram authentication
-log "INFO" "Starting Telegram authentication process..."
-chmod +x telegram_auth.sh
-./telegram_auth.sh
-
-if [ $? -ne 0 ]; then
-    log "ERROR" "Telegram authentication failed. Please try again."
-    exit 1
-fi
-
-# Verify session file one last time
-if ! check_session; then
-    log "ERROR" "Failed to verify Telegram session. Please run setup.sh again."
     exit 1
 fi
 
@@ -189,17 +163,15 @@ $DOCKER_COMPOSE_BIN up -d
 touch .setup_complete
 
 log "INFO" "=== Initial setup completed successfully! ==="
-log "INFO" "Bot is running with persistent Telegram sessions."
+log "INFO" "Bot is running. Telegram authentication will be completed interactively via the bot using /login."
 
 log "INFO" "=== Setup Summary ==="
 log "INFO" "✅ Directories created with proper permissions"
 log "INFO" "✅ Database migrations applied" 
-log "INFO" "✅ Telegram authentication completed"
-log "INFO" "✅ Session file saved in sessions/telegram_bot_session.session"
 log "INFO" "✅ Docker containers built and started with optimizations"
 
 log "INFO" "=== Important Information ==="
-log "INFO" "Your Telegram session is saved in: sessions/telegram_bot_session.session"
+log "INFO" "Your Telegram session will be saved in: sessions/telegram_bot_session.session after login."
 log "INFO" "This file is crucial for authentication - DO NOT delete it!"
 log "INFO" "The sessions directory is persistent and will preserve your login"
 log "INFO" "Logs are stored in the logs/ directory"

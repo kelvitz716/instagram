@@ -29,25 +29,25 @@ class InstagramDownloader:
     Note: Stories and highlights are not supported as they require Instagram's private API access.
     """
     
-    def __init__(self, config: InstagramConfig, downloads_path: Path, cookies_file: Optional[Path] = None):
+    def __init__(self, config: InstagramConfig):
         """
         Initialize the Instagram downloader with configuration.
         
         Args:
             config (InstagramConfig): Configuration object for Instagram
-            downloads_path (Path): Path to store downloaded files
-            cookies_file (Optional[Path]): Path to Netscape-format cookies file
         """
         self.config = config
-        self.downloads_path = downloads_path
-        self.cookies_file = cookies_file
+        self.downloads_path = Path(config.downloads_path)
+        self.cookies_file = Path(config.cookies_file) if config.cookies_file else None
         self.session_manager = None
+        self.downloads_path.mkdir(parents=True, exist_ok=True)
         
-        if cookies_file:
+        if self.cookies_file and self.cookies_file.exists():
             try:
-                self.session_manager = InstagramSessionManager(downloads_path, cookies_file)
+                self.session_manager = InstagramSessionManager(self.downloads_path, self.cookies_file)
             except InstagramSessionError as e:
                 logger.error(f"Failed to initialize sessions: {e}")
+                raise
                 # Don't raise - let the bot start without an initial session
 
         # Path to executables

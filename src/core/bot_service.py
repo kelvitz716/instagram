@@ -27,6 +27,7 @@ class BotService(BaseService):
     """Main bot service implementation."""
     
     def __init__(self, config: BotConfig):
+        """Initialize bot service with configuration."""
         super().__init__()
         self.config = config
         self.service_manager = ServiceManager()
@@ -35,20 +36,27 @@ class BotService(BaseService):
         
         # Register core services
         self._register_services()
+        
+        # Initialize application
+        self.bot_app = None  # Will be initialized in start()
     
     def _register_services(self) -> None:
         """Register all required services."""
         # Core services
-        self.service_manager.register('database', 
-            DatabaseService(self.config.database))
-        self.service_manager.register('session_storage',
-            SessionStorageService(self.config.downloads_path))
+        database = DatabaseService(self.config.database)
+        self.service_manager.register('database', database)
+        
+        # Session services
+        session_storage = SessionStorageService(database, self.config.downloads_path)
+        self.service_manager.register('session_storage', session_storage)
         
         # Content services    
-        self.service_manager.register('instagram',
-            InstagramDownloader(self.config.instagram))
-        self.service_manager.register('uploader',
-            FileUploadService(self.config.upload))
+        instagram = InstagramDownloader(self.config.instagram)
+        self.service_manager.register('instagram', instagram)
+        
+        # Upload service with configuration
+        upload_service = FileUploadService(self.config.upload)
+        self.service_manager.register('uploader', upload_service)
     
     async def initialize(self) -> None:
         """Initialize all services in proper order."""

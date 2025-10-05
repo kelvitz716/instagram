@@ -1,3 +1,4 @@
+import asyncio
 import time
 import random
 from datetime import datetime, timedelta
@@ -20,14 +21,52 @@ class InstagramRateLimiter:
         self.request_history: Dict[float, str] = {}
         
     def load_config(self, config_path: str):
-        # Load configuration from file
-        # For now using default values, implement config loading as needed
-        self.requests_per_hour = 100
-        self.min_request_interval = 6
-        self.batch_delay = 30
-        self.max_backoff = 1800
-        self.backoff_multiplier = 2
-        self.backoff_jitter = 0.1
+        """Load configuration from file."""
+        # Default values in case file can't be read
+        defaults = {
+            'INSTAGRAM_REQUESTS_PER_HOUR': 100,
+            'INSTAGRAM_MIN_REQUEST_INTERVAL': 6,
+            'INSTAGRAM_BATCH_DELAY': 30,
+            'MAX_BACKOFF': 1800,
+            'BACKOFF_MULTIPLIER': 2,
+            'BACKOFF_JITTER': 0.1
+        }
+        
+        try:
+            with open(config_path, 'r') as f:
+                config = {}
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    key, value = map(str.strip, line.split('=', 1))
+                    value = value.split('#')[0].strip()  # Remove inline comments
+                    # Convert the value to the appropriate type
+                    if value.lower() in ('true', 'false'):
+                        config[key] = value.lower() == 'true'
+                    else:
+                        try:
+                            config[key] = float(value)
+                        except ValueError:
+                            config[key] = value
+                    
+            # Set values from config or use defaults
+            self.requests_per_hour = int(config.get('INSTAGRAM_REQUESTS_PER_HOUR', defaults['INSTAGRAM_REQUESTS_PER_HOUR']))
+            self.min_request_interval = config.get('INSTAGRAM_MIN_REQUEST_INTERVAL', defaults['INSTAGRAM_MIN_REQUEST_INTERVAL'])
+            self.batch_delay = config.get('INSTAGRAM_BATCH_DELAY', defaults['INSTAGRAM_BATCH_DELAY'])
+            self.max_backoff = config.get('MAX_BACKOFF', defaults['MAX_BACKOFF'])
+            self.backoff_multiplier = config.get('BACKOFF_MULTIPLIER', defaults['BACKOFF_MULTIPLIER'])
+            self.backoff_jitter = config.get('BACKOFF_JITTER', defaults['BACKOFF_JITTER'])
+            
+        except (FileNotFoundError, ValueError) as e:
+            logging.warning(f"Failed to load rate limiting config from {config_path}: {e}")
+            logging.warning("Using default values")
+            self.requests_per_hour = defaults['INSTAGRAM_REQUESTS_PER_HOUR']
+            self.min_request_interval = defaults['INSTAGRAM_MIN_REQUEST_INTERVAL']
+            self.batch_delay = defaults['INSTAGRAM_BATCH_DELAY']
+            self.max_backoff = defaults['MAX_BACKOFF']
+            self.backoff_multiplier = defaults['BACKOFF_MULTIPLIER']
+            self.backoff_jitter = defaults['BACKOFF_JITTER']
         
     def add_jitter(self, delay: float) -> float:
         """Add random jitter to delay to avoid synchronized requests."""

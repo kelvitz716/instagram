@@ -1,63 +1,96 @@
-#!/usr/bin/env python3
-"""Test script for Instagram session."""
+"""Tests for Instagram session management."""
 import asyncio
 import logging
+import pytest
 from pathlib import Path
-from src.services.instagram_downloader import InstagramDownloader
+from unittest.mock import Mock, patch, mock_open
+
 from src.core.config import InstagramConfig
 from src.core.session_manager import InstagramSessionError, InstagramSessionManager
+from src.services.instagram_downloader import InstagramDownloader
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Configure logging
 logger = logging.getLogger(__name__)
 
-# Your Instagram username
-INSTAGRAM_USERNAME = "kelvitz"
+# Test configuration
+INSTAGRAM_USERNAME = "test_user"  # Test Instagram username
 
-class SessionTester:
-    def __init__(self):
-        # Create basic config
-        self.config = InstagramConfig()
-        self.config.download_timeout = 60  # 60 seconds timeout
-        self.config.username = INSTAGRAM_USERNAME
-        
-        # Initialize paths
-        self.downloads_path = Path("downloads")
-        self.downloads_path.mkdir(parents=True, exist_ok=True)
-        
-    async def test_session(self):
-        """Test Firefox session"""
-        try:
-            # Initialize session manager with cookies file
-            cookies_file = Path("gallery-dl-cookies.txt")
-            if not cookies_file.exists():
-                print("\n❌ No cookies.txt file found. Please upload your Instagram cookies file first.")
-                return False
-                
-            session_manager = InstagramSessionManager(self.downloads_path, cookies_file)
-            browser_valid = session_manager.check_session()
-            
-            print("\n=== Session Status ===")
-            print(f"Firefox Session: {'✅ Valid' if browser_valid else '❌ Invalid'}")
-            print(f"Using Instagram username: {INSTAGRAM_USERNAME}")
-            
-            if not browser_valid:
-                print("\n⚠️  Session Setup Instructions:")
-                print("\nFor Firefox Session:")
-                print("1. Open Firefox")
-                print("2. Go to instagram.com")
-                print("3. Log in to your account")
-                print("4. Make sure to check 'Remember me' when logging in")
-                return False
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to test session: {e}")
-            return False
+# Mark all tests in this module as asyncio tests
+pytestmark = pytest.mark.asyncio
+
+@pytest.fixture
+def temp_path(tmp_path):
+    """Create a temporary directory for testing."""
+    return tmp_path
+
+@pytest.fixture
+def config():
+    """Create a test configuration."""
+    config = InstagramConfig()
+    config.download_timeout = 5  # Short timeout for tests
+    config.username = "test_user"
+    return config
+
+@pytest.fixture
+def cookies_file(temp_path):
+    """Create a mock cookies file."""
+    cookies_path = temp_path / "cookies.txt"
+    cookies_path.write_text("test_cookies_content")
+    return cookies_path
+
+@pytest.fixture
+def session_manager(temp_path, config, cookies_file):
+    """Create a session manager instance."""
+    downloads_path = temp_path / "downloads"
+    downloads_path.mkdir()
+    return InstagramSessionManager(downloads_path, cookies_file)
+
+async def test_session_initialization(session_manager):
+    """Test proper session manager initialization."""
+    assert session_manager.downloads_path.exists()
+    assert session_manager.cookies_file.exists()
+
+async def test_session_validation(session_manager):
+    """Test session validation with valid cookies."""
+    with patch.object(session_manager, '_validate_cookies', return_value=True):
+        assert await session_manager.check_session()
+
+async def test_session_validation_failure(session_manager):
+    """Test session validation with invalid cookies."""
+    with patch.object(session_manager, '_validate_cookies', return_value=False):
+        assert not await session_manager.check_session()
+
+async def test_session_error_handling(session_manager):
+    """Test error handling during session operations."""
+    with patch.object(session_manager, '_validate_cookies', side_effect=InstagramSessionError("Invalid session")):
+        with pytest.raises(InstagramSessionError, match="Invalid session"):
+            await session_manager.check_session()
+
+async def test_session_refresh(session_manager):
+    """Test session refresh functionality."""
+    with patch.object(session_manager, '_refresh_session') as mock_refresh:
+        await session_manager.refresh_session()
+        mock_refresh.assert_called_once()
+
+async def test_session_cleanup(session_manager):
+    """Test session cleanup."""
+    with patch.object(session_manager, '_cleanup_session') as mock_cleanup:
+        await session_manager.cleanup()
+        mock_cleanup.assert_called_once()
+
+async def test_manual_session_setup():
+    """Test manual session setup instructions."""
+    try:
+        print("Manual Session Setup Instructions:")
+        print("1. Clear your browser cookies")
+        print("2. Go to instagram.com")
+        print("3. Log in to your account")
+        print("4. Make sure to check 'Remember me' when logging in")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to test session: {e}")
+        return False
+    return True
     
     async def run_tests(self):
         """Run all download tests"""
@@ -114,9 +147,8 @@ class SessionTester:
             logger.error(f"Test run failed: {e}")
             print(f"\n❌ Test run failed: {e}")
 
-def main():
-    tester = SessionTester()
-    asyncio.run(tester.run_tests())
+if __name__ == "__main__":
+    pytest.main([__file__])
 
 if __name__ == "__main__":
-    main()
+

@@ -13,6 +13,7 @@ from src.services.telegram_session_storage import TelegramSessionStorage
 logger = logging.getLogger(__name__)
 
 # Conversation states
+LOGIN_OTP, LOGIN_PASSWORD = range(2)  # For compatibility with bot.py
 PHONE_NUMBER, CODE, PASSWORD = range(3)
 
 class TelethonAuthCommand:
@@ -68,6 +69,14 @@ class TelethonAuthCommand:
 
         user_id = update.effective_user.id
         phone_number = update.message.text.strip()
+
+        # Basic phone number validation
+        if not phone_number.startswith('+') or not phone_number[1:].isdigit():
+            await update.message.reply_text(
+                "❌ Invalid phone number format.\n"
+                "Please enter the number in international format: +1234567890"
+            )
+            return PHONE_NUMBER
 
         # Create a new Telethon client
         session_path = self.sessions_path / f"telethon_{user_id}.session"

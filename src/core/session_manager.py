@@ -36,6 +36,7 @@ class InstagramSessionManager:
         self.cookies_file = cookies_file
         self._session_cookies: Dict[str, str] = {}
         self._last_cookie_refresh = None  # Timestamp of last successful cookie refresh
+        self._is_valid = False
         if cookies_file and cookies_file.exists():
             self._load_cookies()
 
@@ -84,12 +85,58 @@ class InstagramSessionManager:
             # Load the cookies into the manager
             self._session_cookies = session_cookies
             self._last_cookie_refresh = datetime.now()
+            self._is_valid = True
 
             return session_cookies
 
         except Exception as e:
             raise InstagramSessionError(f"Failed to load cookies: {str(e)}")
 
+    async def is_valid(self) -> bool:
+        """Check if the current session is valid."""
+        try:
+            if not self._session_cookies:
+                return False
+                
+            # Check if we have required cookies
+            missing_cookies = [name for name in self.REQUIRED_COOKIES 
+                             if name not in self._session_cookies]
+            if missing_cookies:
+                return False
+                
+            # Check if cookies file exists
+            if not self.cookies_file or not self.cookies_file.exists():
+                return False
+                
+            # If we haven't checked validity recently, do a quick test
+            if not self._last_cookie_refresh or \
+               datetime.now() - self._last_cookie_refresh > timedelta(hours=1):
+                try:
+                    # Make a test request to Instagram
+                    response = requests.get(
+                        'https://www.instagram.com/data/shared_data/',
+                        cookies=self._session_cookies,
+                        timeout=10
+                    )
+                    
+                    if response.status_code != 200 or '"authenticated":false' in response.text:
+                        self._is_valid = False
+                        return False
+                        
+                    self._is_valid = True
+                    self._last_cookie_refresh = datetime.now()
+                    
+                except Exception as e:
+                    logger.warning(f"Session validation failed: {e}")
+                    self._is_valid = False
+                    return False
+                    
+            return self._is_valid
+            
+        except Exception as e:
+            logger.error(f"Error checking session validity: {e}")
+            return False
+            
     def _load_cookies(self, max_retries: int = 3, initial_delay: float = 1.0) -> None:
         """Load cookies from Netscape file and validate them with retries."""
         last_error = None

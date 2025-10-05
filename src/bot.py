@@ -3,31 +3,18 @@
 Instagram Content Downloader Bot
 
 A Telegram bot that automatically detects and downloads content from Instagram URLs.
-Supports posts, reels, stories, highlights, and profiles with optimized performance
+Supports posts, reels, stories, highlights, and files with optimized performance
 and service-based architecture.
-
-Features:
-- Service-based architecture with lifecycle management
-- Automatic URL detection and content type identification
-- Support for multiple Instagram content types
-- Optimized download and upload handling
-- Progress tracking and status updates
-- Database logging and statistics
-- Periodic cleanup of downloaded files
-- Enhanced error handling and recovery
-- Improved session management
-
-Author: @kelvitz716
-Version: 3.0.0
 """
 
 # Standard library imports
-import asyncio
-import json
 import logging
-import pathlib
-import re
+
+# Configure logger
+logger = logging.getLogger(__name__)
+import sys
 import time
+import tempfile
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -36,33 +23,81 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # Third-party imports
 import structlog
 from rich.console import Console
-from telegram import Message, Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Message, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, error as telegram_error
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler, 
-    filters, ContextTypes
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ConversationHandler, filters, ContextTypes
 )
-from telegram import error as telegram_error
 from telethon import TelegramClient
+from telethon import errors as telethon_errors
+
+# Core imports
+from src.core.config import BotConfig
+from src.core.services import BotServices 
+from src.core.session_commands import SessionCommands
+from src.core.help_command import HelpCommandMixin
+
+# Additional imports for missing symbols
+from src.core.session_manager import InstagramSessionManager
+from src.core.resilience.recovery import SessionRecovery, StateRecovery
+from src.services.database import DatabaseService
+from src.services.session_storage import SessionStorageService
+from src.services.telegram_session_storage import TelegramSessionStorage
+from src.services.instagram_downloader import InstagramDownloader
+from src.services.bot_api_uploader import BotAPIUploader
+from src.services.telethon_uploader import TelethonUploader
+from src.services.progress import ProgressTracker
+from src.services.cleanup import CleanupService
+from src.core.metrics_command import metrics_command
+from src.core.retry import with_retry
+from src.core.resilience.circuit_breaker import with_circuit_breaker
+from src.core.constants import URL_PATTERN, CONTENT_ICONS
+from src.core.monitoring.logging import setup_structured_logging
+
+# Auth states
+from src.core.telethon_auth_command import LOGIN_OTP, LOGIN_PASSWORD
+
+# Configure logger
+logger = logging.getLogger(__name__)
+
+# Standard library imports
+import asyncio
+import json
+import logging
+import pathlib
+import re
+import sys
+import time
+import tempfile
+from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+# Third-party imports
+import structlog
+from rich.console import Console
+from telegram import Message, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, error as telegram_error
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ConversationHandler, filters, ContextTypes
+)
+from telethon import TelegramClient
+from telethon import errors as telethon_errors
 
 # Core imports
 from src.core.config import BotConfig
 from src.core.services import BotServices
+from src.core.session_commands import SessionCommands
+from src.core.help_command import HelpCommandMixin
 from src.core.resilience.retry import with_retry
 from src.core.metrics_command import metrics_command
 from src.core.resilience.circuit_breaker import with_circuit_breaker, ServiceUnavailableError
 from src.core.resilience.recovery import SessionRecovery, StateRecovery
-from src.core.help_command import HelpCommandMixin
-from src.core.session_commands import SessionCommands
+from src.core.telethon_auth_command import TelethonAuthCommand
 from src.core.session_manager import InstagramSessionManager
 
-# Local imports
-from src.services.database import DatabaseService
-from src.services.upload import FileUploadService
-from src.services.bot_api_uploader import BotAPIUploader
-from src.services.telethon_uploader import TelethonUploader
-from src.services.instagram_downloader import InstagramDownloader
-from src.services.progress import ProgressTracker
-from src.services.session_storage import SessionStorageService, SessionStorageError
+# Service imports
 from src.services.database import DatabaseService
 from src.services.upload import FileUploadService
 from src.services.bot_api_uploader import BotAPIUploader
@@ -71,6 +106,8 @@ from src.services.instagram_downloader import InstagramDownloader
 from src.services.progress import ProgressTracker
 from src.services.session_storage import SessionStorageService, SessionStorageError
 from src.services.telegram_session_storage import TelegramSessionStorage, TelegramSessionStorageError
+from src.services.cleanup import CleanupService
+from src.services.resource_manager import ResourceManager
 
 # Global constants for optimization
 CONTENT_ICONS = {
@@ -95,25 +132,435 @@ INSTAGRAM_URL_PATTERN = re.compile(
     re.I
 )
 
-# Optimize logging configuration
-structlog.configure(
-    processors=[
-        structlog.stdlib.filter_by_level,
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.dev.ConsoleRenderer()
-    ],
-    wrapper_class=structlog.stdlib.BoundLogger,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-    cache_logger_on_first_use=True,
-)
+# Import monitoring tools
+from src.core.monitoring import setup_structured_logging
+from src.core.config import LoggingConfig
 
+# Initialize logging
 logger = structlog.get_logger(__name__)
 console = Console()
-BOT_VERSION = "2.0.0"
+
+# Version information
+BOT_VERSION = "3.0.0"
+
+# Authentication states
+LOGIN_OTP, LOGIN_PASSWORD = range(2)
+
+class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
+    def __init__(self, config: BotConfig):
+        # Initialize bot with configuration
+        self.config = config
+        self.services = BotServices.create(config)
+        self.content_detector = ContentDetector()
+        self.session_manager = InstagramSessionManager(downloads_path=config.instagram.downloads_path)
+        self.session_recovery = SessionRecovery(services=self.services)
+        self.state_recovery = StateRecovery(services=self.services)
+        # Initialize bot application
+        self.bot_app = Application.builder().token(config.telegram.bot_token).build()
+        # Initialize services
+        self._init_services()
+        # Setup command handlers
+        self._setup_handlers()
+
+    async def _initialize_database(self):
+        """Initialize the database."""
+        # Database is already initialized in BotServices.create()
+        pass
+    
+    def _init_services(self):
+        # Services are already initialized in BotServices.create()
+        # Just assign the cleanup service from services
+        self.cleanup_service = self.services.cleanup_service
+        
+    def _setup_handlers(self):
+        # Configure bot command and message handlers
+        # Add command handlers
+        self.bot_app.add_handler(CommandHandler("start", self._start_command))
+        self.bot_app.add_handler(CommandHandler("help", self.handle_help))
+        self.bot_app.add_handler(CommandHandler("metrics", metrics_command))
+        self.bot_app.add_handler(CommandHandler("cleanup", self._cleanup_command))
+        self.bot_app.add_handler(CommandHandler("stats", self._stats_command))
+        self.bot_app.add_handler(CommandHandler("telegram_status", self._telegram_status_command))
+        self.bot_app.add_handler(CommandHandler("session_list", self._session_list_command))
+        self.bot_app.add_handler(CommandHandler("session_upload", self._session_upload_command))
+        
+        # Add conversation handler for authentication
+        auth_handler = ConversationHandler(
+            entry_points=[CommandHandler("auth", self._auth_command)],
+            states={
+                LOGIN_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._otp_handler)],
+                LOGIN_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._password_handler)]
+            },
+            fallbacks=[CommandHandler("cancel", self._cancel_auth)]
+        )
+        self.bot_app.add_handler(auth_handler)
+        
+        # Add URL detection handler for Instagram links
+        self.bot_app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.Regex(r'https?://(?:www\.)?instagram\.com/'),
+            self._handle_instagram_link
+        ))
+        
+        # Add callback query handler
+        self.bot_app.add_handler(CallbackQueryHandler(self._handle_callback))
+        
+        # Add error handler
+        self.bot_app.add_error_handler(self._error_handler)
+        
+    async def initialize(self):
+    # Initialize bot and all services
+        try:
+            # Initialize database first
+            await self._initialize_database()
+            
+            # Start all other services
+            await self.services.start_all()
+            logger.info("Bot services initialized successfully")
+        except Exception as e:
+            logger.error("Failed to initialize services", exc_info=True)
+            raise
+            
+    async def shutdown(self):
+    # Graceful shutdown of bot and services
+        try:
+            await self.services.stop_all()
+            await self.bot_app.stop()
+            await self.bot_app.shutdown()
+            logger.info("Bot shutdown completed successfully")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+            
+    def _schedule_cleanup(self):
+        # Schedule periodic cleanup tasks
+        cleanup_service = self.services.get(CleanupService)
+        if cleanup_service:
+            cleanup_service.schedule_cleanup(scheduler=self.bot_app)
+            
+    async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Handle /start command
+        await update.message.reply_text(
+            "👋 Welcome! Send me Instagram links and I'll download the content for you.\n"
+            "Use /help to see all available commands."
+        )
+        
+    @with_retry
+    @with_circuit_breaker
+    async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Handle incoming messages and detect Instagram URLs
+        message = update.message
+        text = message.text
+        
+        # Find all URLs in message
+        urls = URL_PATTERN.finditer(text)
+        instagram_urls = []
+        
+        for url_match in urls:
+            url = url_match.group()
+            if self.content_detector.is_instagram_url(url):
+                instagram_urls.append(self.content_detector.normalize_url(url))
+                
+        if not instagram_urls:
+            return
+            
+        # Process each Instagram URL
+        for url in instagram_urls:
+            try:
+                content_type, identifier, secondary = self.content_detector.detect_content_type(url)
+                await self._process_content(message, url, content_type, identifier, secondary, context)
+            except Exception as e:
+                logger.error(f"Error processing URL {url}: {e}", exc_info=True)
+                await message.reply_text(f"Sorry, I couldn't process this URL: {url}")
+                
+    async def _process_content(self, message: Message, url: str, content_type: str, 
+                             identifier: str, secondary: Optional[str], context: ContextTypes.DEFAULT_TYPE):
+    # Process detected Instagram content
+        progress_msg = await message.reply_text(
+            f"{CONTENT_ICONS.get(content_type, '📄')} Processing {content_type}..."
+        )
+        
+        try:
+            downloader = self.services.get(InstagramDownloader)
+            progress = self.services.get(ProgressTracker)
+            
+            # Start progress tracking
+            tracker_id = progress.start_tracking(message.chat_id, message.message_id)
+            
+            # Download content
+            files = await downloader.download(url, progress.update_progress)
+            
+            if not files:
+                await progress_msg.edit_text("No content found or content is private.")
+                return
+                
+            # Upload files
+            for file in files:
+                if file.stat().st_size > self.config.bot_api_limit:
+                    await self._upload_large_file(message, file, context)
+                else:
+                    await self._upload_small_file(message, file, content_type)
+                    
+            await progress_msg.delete()
+            
+        except Exception as e:
+            error_msg = f"Failed to process {content_type}: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            await progress_msg.edit_text(error_msg)
+            
+    async def _upload_large_file(self, message: Message, file: Path, context: ContextTypes.DEFAULT_TYPE):
+    # Upload large files using Telethon
+        uploader = self.services.get(TelethonUploader)
+        await uploader.upload(file)
+        
+    async def _upload_small_file(self, message: Message, file: Path, content_type: str):
+    # Upload small files using Bot API
+        uploader = self.services.get(BotAPIUploader)
+        await uploader.upload(file, content_type)
+        
+    async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
+    # Handle bot errors
+        try:
+            if update and isinstance(update, Update) and update.effective_message:
+                await update.effective_message.reply_text(
+                    "Sorry, something went wrong. Please try again later."
+                )
+            logger.error("Bot error", exc_info=context.error)
+        except:
+            logger.exception("Error in error handler")
+            
+    async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Handle callback queries from inline keyboards
+        query = update.callback_query
+        await query.answer()
+        
+        try:
+            action, data = query.data.split(':', 1)
+            if action == 'auth':
+                await self._handle_auth_callback(query, data)
+            elif action == 'cancel':
+                await query.message.edit_text("Operation cancelled.")
+        except Exception as e:
+            logger.error(f"Error handling callback: {e}", exc_info=True)
+            await query.message.edit_text("Sorry, something went wrong.")
+            
+    async def _handle_auth_callback(self, query: CallbackQuery, data: str):
+    # Handle authentication-related callbacks
+        try:
+            if data == 'start':
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Login with Password", callback_data='auth:password')],
+                    [InlineKeyboardButton("Cancel", callback_data='cancel')]
+                ])
+                await query.message.edit_text(
+                    "Please choose login method:",
+                    reply_markup=keyboard
+                )
+            elif data == 'password':
+                # Start password authentication flow
+                await query.message.edit_text(
+                    "Please enter your Instagram password:"
+                )
+                return LOGIN_PASSWORD
+        except Exception as e:
+            logger.error(f"Auth callback error: {e}", exc_info=True)
+            await query.message.edit_text("Authentication failed. Please try again.")
+            
+    async def _auth_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Handle /auth command to start authentication process
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Start Authentication", callback_data='auth:start')],
+            [InlineKeyboardButton("Cancel", callback_data='cancel')]
+        ])
+        await update.message.reply_text(
+            "Start Instagram authentication process:",
+            reply_markup=keyboard
+        )
+        return ConversationHandler.END
+        
+    async def _otp_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Handle OTP code entry
+        otp_code = update.message.text.strip()
+        
+        try:
+            # Verify OTP code
+            await self.session_manager.verify_otp(otp_code)
+            await update.message.reply_text("Authentication successful! ✅")
+            return ConversationHandler.END
+        except Exception as e:
+            await update.message.reply_text(f"Invalid OTP code. Please try again.\nError: {str(e)}")
+            return LOGIN_OTP
+            
+    async def _password_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle password entry"""
+        password = update.message.text.strip()
+        
+        try:
+            # Attempt password login
+            await self.session_manager.login_with_password(password)
+            await update.message.reply_text("Login successful! ✅")
+            return ConversationHandler.END
+        except Exception as e:
+            await update.message.reply_text(f"Login failed: {str(e)}")
+            return ConversationHandler.END
+            
+    async def _handle_instagram_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle Instagram links in messages."""
+        if not update.message or not update.message.text:
+            return
+            
+        try:
+            # Send initial status
+            status_msg = await update.message.reply_text(
+                "🔄 Processing Instagram link..."
+            )
+            
+            # Extract and process Instagram URL
+            url = update.message.text.strip()
+            downloaded_files = await self.services.instagram_service.download_content(url)
+            
+            if not downloaded_files:
+                await status_msg.edit_text("❌ Download failed: No content found")
+                return
+                
+            # Update status
+            await status_msg.edit_text(
+                f"✅ Downloaded {len(downloaded_files)} file(s)\n"
+                f"⬆️ Uploading to Telegram..."
+            )
+            
+            # Upload each file
+            for file_path in downloaded_files:
+                file_size = file_path.stat().st_size
+                mime_type = "video/mp4" if file_path.suffix.lower() == '.mp4' else "image/jpeg"
+                if file_size > 50 * 1024 * 1024:  # 50MB
+                    await self._upload_large_file(update.message, file_path, context)
+                else:
+                    await self._upload_small_file(update.message, file_path, mime_type)
+                    
+            await status_msg.delete()
+            
+        except Exception as e:
+            logger.error(f"Error processing Instagram link: {e}", exc_info=True)
+            try:
+                await update.message.reply_text(
+                    f"❌ Failed to process Instagram content:\n{str(e)}\n\n"
+                    "Please make sure you have a valid Instagram session. "
+                    "Use /session to upload a cookies.txt file."
+                )
+            except:
+                pass
+        except Exception as e:
+            await update.message.reply_text(f"Login failed. Please try again.\nError: {str(e)}")
+            return LOGIN_PASSWORD
+            
+    async def _cancel_auth(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Cancel the authentication process
+        await update.message.reply_text("Authentication cancelled.")
+        return ConversationHandler.END
+
+    async def _cleanup_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /cleanup command."""
+        try:
+            cleanup_service = self.services.get(CleanupService)
+            if not cleanup_service:
+                await update.message.reply_text("Cleanup service not available.")
+                return
+                
+            dirs_removed, bytes_freed = await asyncio.to_thread(cleanup_service.cleanup_old_directories)
+            mb_freed = bytes_freed / (1024 * 1024)
+            
+            await update.message.reply_text(
+                f"Cleanup completed!\n"
+                f"✨ Removed: {dirs_removed} directories\n"
+                f"🗑 Freed up: {mb_freed:.2f} MB"
+            )
+        except Exception as e:
+            logger.error("Cleanup error", exc_info=e)
+            await update.message.reply_text(f"Error during cleanup: {str(e)}")
+
+    async def _stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /stats command."""
+        try:
+            cleanup_service = self.services.get(CleanupService)
+            if not cleanup_service:
+                await update.message.reply_text("Statistics not available.")
+                return
+                
+            stats = await asyncio.to_thread(cleanup_service.get_storage_stats)
+            
+            await update.message.reply_text(
+                f"📊 STORAGE STATISTICS\n\n"
+                f"💾 Total Size: {stats['total_size_mb']:.2f} MB\n"
+                f"📁 Total Directories: {stats['total_directories']}\n"
+                f"🆕 Active Directories: {stats['clean_directories']}\n"
+                f"⏳ Old Directories: {stats['old_directories']}"
+            )
+        except Exception as e:
+            logger.error("Stats error", exc_info=e)
+            await update.message.reply_text(f"Error getting statistics: {str(e)}")
+
+    async def _telegram_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /telegram_status command."""
+        try:
+            telethon_uploader = self.services.get(TelethonUploader)
+            if not telethon_uploader:
+                await update.message.reply_text("Telegram service not available.")
+                return
+                
+            is_authorized = await telethon_uploader.is_authorized()
+            status = "✅ Authorized" if is_authorized else "❌ Not authorized"
+            
+            await update.message.reply_text(
+                f"📡 TELEGRAM STATUS\n\n"
+                f"Authorization: {status}\n"
+                f"Large File Upload: {'✅ Available' if is_authorized else '❌ Not available'}\n"
+                f"Bot API: ✅ Connected"
+            )
+        except Exception as e:
+            logger.error("Telegram status error", exc_info=e)
+            await update.message.reply_text(f"Error checking Telegram status: {str(e)}")
+
+    async def _session_list_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /session_list command."""
+        try:
+            session_manager = self.session_manager
+            session_valid = await session_manager.is_valid()
+            
+            await update.message.reply_text(
+                f"🔑 SESSION STATUS\n\n"
+                f"Current Session: {'✅ Valid' if session_valid else '❌ Invalid'}\n"
+                f"Last Refresh: {session_manager.last_refresh_time if hasattr(session_manager, 'last_refresh_time') else 'Never'}\n"
+                f"\nUse /session_upload to update session."
+            )
+        except Exception as e:
+            logger.error("Session list error", exc_info=e)
+            await update.message.reply_text(f"Error listing sessions: {str(e)}")
+
+    async def _session_upload_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /session_upload command."""
+        await update.message.reply_text(
+            "📤 UPLOAD SESSION\n\n"
+            "To upload a new session:\n\n"
+            "1. Export cookies from browser:\n"
+            "   - Install 'Cookie Quick Manager' or\n"
+            "   - Install 'Export Cookies' extension\n\n"
+            "2. Save as Netscape format file\n\n"
+            "3. Upload file here with caption /session\n\n"
+            "Note: Must be logged into Instagram!"
+        )
+
+# Instagram URL constants
+BASE_INSTAGRAM = r'(?:https?://)?(?:www\.)?'
+INSTAGRAM_DOMAINS = ['instagram.com', 'instagr.am']
+PATH_END = r'(?:/|\?|&|$)'
+
+# Instagram URL pattern for basic validation
+INSTAGRAM_URL_PATTERN = re.compile(
+    f"{BASE_INSTAGRAM}(?:{'|'.join(INSTAGRAM_DOMAINS)})/.*",
+    re.IGNORECASE
+)
 
 class ContentDetector:
-    """Enhanced content detection for Instagram URLs with pattern matching."""
+    # Enhanced content detection for Instagram URLs with pattern matching
     
     # Pre-compile patterns for better performance
     PATTERNS = {
@@ -143,18 +590,7 @@ class ContentDetector:
     
     @classmethod
     def detect_content_type(cls, url: str) -> Tuple[str, str, Optional[str]]:
-        """
-        Detect Instagram content type from URL.
-        
-        Args:
-            url (str): Instagram URL to analyze
-            
-        Returns:
-            Tuple[str, str, Optional[str]]: (content_type, identifier, secondary_identifier)
-            
-        Note:
-            Uses pre-compiled regex patterns for better performance
-        """
+        # Detect Instagram content type from URL
         # Clean the URL
         url = url.strip()
         
@@ -178,24 +614,15 @@ class ContentDetector:
     
     @classmethod
     def is_instagram_url(cls, url: str) -> bool:
-        """
-        Check if URL is a valid Instagram URL
-        
-        Args:
-            url (str): URL to validate
-            
-        Returns:
-            bool: True if URL is a valid Instagram URL
-        """
-        # Use pre-compiled pattern for validation
+        # Check if URL is a valid Instagram URL
         return bool(INSTAGRAM_URL_PATTERN.match(url))
     
     @classmethod
     def normalize_url(cls, url: str) -> str:
-        """Normalize Instagram URL by removing unnecessary parameters"""
+    # Normalize Instagram URL by removing unnecessary parameters
         # Remove query parameters except essential ones for stories
         if '/stories/' in url:
-            return url.split('?')[0]  # Keep stories URLs clean
+            return url.split('?')[0]
         
         # For other content, remove query params and trailing slash
         url = url.split('?')[0].rstrip('/')
@@ -206,699 +633,60 @@ class ContentDetector:
         
         return url
 
-class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
-    """
-    Enhanced Telegram bot with optimized service architecture for Instagram content.
-    
-    This class manages the main bot functionality including:
-    - Service initialization and management
-    - Message handling and content detection
-    - File download and upload operations
-    - Database logging and cleanup
-    - Session management with cookie file support
-    - Session management with cookies.txt support
-    
-    Attributes:
-        config (BotConfig): Bot configuration including API keys and settings
-        service_manager (ServiceManager): Manages service lifecycles
-        url_service (URLDetectionService): URL detection and validation
-        _cache (Dict[str, Any]): Internal cache for optimization
-    """
-
-    def __init__(self, config: BotConfig) -> None:
-        """
-        Initialize the bot with configuration and services.
-        
-        Args:
-            config (BotConfig): Bot configuration instance containing all settings
-        """
-        super().__init__()
-        self.config = config
-        self.services = BotServices.create(config)
-        self.detector = ContentDetector()
-        self._setup_directories()
-        self._cache: Dict[str, Any] = {}
-        self._user_states: Dict[int, Dict[str, Any]] = {}
+# Second implementation removed to fix duplicate class definition
         
         # Initialize recovery services
         self.session_recovery = SessionRecovery(self.services)
         self.state_recovery = StateRecovery(self.services)
         
+        # Initialize bot application and handlers
+        self._init_services()
+        self._setup_handlers()
+        
     def _setup_directories(self) -> None:
-        """
-        Setup required directories for bot operation with error handling.
-        
-        Creates directories for:
-        - Downloads: Temporary storage for downloaded content
-        - Uploads: Staging area for content to be uploaded
-        - Temp: General temporary file storage
-        
-        Raises:
-            Exception: If directory creation fails
-        """
+    # Setup required directories with proper permissions
         try:
             for path in [self.config.downloads_path, self.config.uploads_path, self.config.temp_path]:
                 path.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            logger.error("Failed to create directories", error=str(e))
+            logger.error(f"Failed to create directories: {e}")
             raise
             
     @lru_cache(maxsize=1)
     def _get_uploader(self, file_size: int) -> str:
-        """
-        Get the appropriate uploader based on file size with caching.
-        
-        Args:
-            file_size (int): Size of the file in bytes
-            
-        Returns:
-            str: 'telethon' for large files, 'bot_api' for smaller files
-        """
+    # Get the appropriate uploader based on file size
         return 'telethon' if file_size > self.config.upload.large_file_threshold else 'bot_api'
 
-    async def initialize(self) -> None:
-        """
-        Initialize bot services in a specific sequence with resilience features.
-        
-        Sequence:
-        1. Database initialization
-        2. Telegram client setup
-        3. Upload services configuration
-        4. Instagram service setup
-        5. Resume any pending downloads
-        
-        Raises:
-            Exception: If any initialization step fails
-        """
-        try:
-            # Initialize components sequentially
-            await self._initialize_database()
-
-            # Add Telegram session table to database
-            await self._create_telegram_session_table()
-
-            # Initialize Telegram with persistent sessions
-            await self._initialize_telegram()
-
-            # Initialize other services
-            self._initialize_instagram()
-            self.services.instagram_service = self.instagram_downloader
-            self.services.session_storage = self.session_storage
-
-            await self._initialize_uploaders()
-
-            # Start resource monitoring
-            await self.resource_manager.start_monitoring()
-
-            # Schedule maintenance tasks
-            await self._schedule_session_maintenance()
-
-            # Resume any interrupted downloads
-            try:
-                pending_downloads = await self.state_recovery.get_pending_downloads()
-                if pending_downloads:
-                    logger.info(f"Found {len(pending_downloads)} interrupted downloads  to resume")
-                    for state in pending_downloads:
-                        await self.state_recovery.resume_download(state)
-            except Exception as e:
-                logger.error("Failed to resume downloads", error=str(e))
-
-            logger.info("Bot initialized successfully with persistent sessions",    version=BOT_VERSION)
-
-        except Exception as e:
-            logger.error("Failed to initialize bot", error=str(e))
-            raise
-
-    async def _create_telegram_session_table(self):
-        """Ensure the telegram_sessions table exists."""
-        try:
-            conn = self.services.database_service._pool.acquire()
-            try:
-                await self.services.database_service._create_telegram_sessions_table    (conn)
-            finally:
-                self.services.database_service._pool.release(conn)
-        except Exception as e:
-            logger.error(f"Failed to create telegram_sessions table: {e}")
-            raise
-
-    async def _schedule_session_maintenance(self) -> None:
-        """Schedule periodic maintenance of stored sessions."""
-        async def session_cleanup():
-            try:
-                # Clean up expired Telegram sessions
-                deleted_count = await self.telegram_session_storage.    cleanup_old_sessions()
-                if deleted_count > 0:
-                    logger.info(f"Cleaned up {deleted_count} expired Telegram   sessions")
-
-                # Clean up expired Instagram sessions
-                if hasattr(self, 'session_storage'):
-                    instagram_deleted = await self.session_storage. cleanup_expired_sessions()
-                    if instagram_deleted > 0:
-                        logger.info(f"Cleaned up {instagram_deleted} expired Instagram  sessions")
-
-            except Exception as e:
-                logger.error(f"Session maintenance failed: {e}")
-
-        # Run session cleanup daily
-        self.bot_app.job_queue.run_repeating(session_cleanup, interval=24*60*60)
-            
-    def _initialize_instagram(self) -> None:
-        """Initialize Instagram downloader and cleanup service."""
-        downloads_path = self.config.downloads_path
-        
-        # Initialize session storage service first
-        self.session_storage = SessionStorageService(
-            self.services.database_service,
-            downloads_path
-        )
-
-        # Create session manager instance
-        self.session_manager = InstagramSessionManager(
-            downloads_path=downloads_path,
-            cookies_file=None  # Start without cookies, they'll be loaded per user
-        )
-
-        # Initialize Instagram downloader without cookies
-        self.instagram_downloader = InstagramDownloader(
-            self.config.instagram,
-            downloads_path=downloads_path
-        )
-        
-        # Initialize cleanup service with 2-day retention
-        from src.services.cleanup import CleanupService
-        self.cleanup_service = CleanupService(downloads_path, max_age_days=2)
-        
-        # Initialize resource management
-        from src.services.resource_manager import ResourceManager
-        self.resource_manager = ResourceManager(
-            config=self.config,
-            db_service=self.services.database_service,
-            cleanup_service=self.cleanup_service,
-            telegram_session_storage=self.telegram_session_storage,
-            instagram_session_storage=self.session_storage
-        )
-        
-    async def handle_cleanup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /cleanup command for manual media cleanup."""
-        # Send initial status
-        status_message = await update.message.reply_text(
-            "🧹 CLEANUP OPERATION\n"
-            "==============================\n"
-            "⏳ Cleaning up media files...\n"
-            "This may take a moment."
-        )
-        
-        try:
-            # Clean up all media files
-            dirs_removed, bytes_freed = await self.cleanup_service.cleanup_all_media()
-            
-            if dirs_removed > 0:
-                await self._safe_edit_message(
-                    status_message,
-                    "✨ CLEANUP COMPLETE\n"
-                    "==============================\n\n"
-                    "📊 CLEANUP RESULTS\n"
-                    "------------------------------\n"
-                    f"├─ 🗑️ Directories : ✅ {dirs_removed:,} removed\n"
-                    f"╰─ 💾 Space Freed : ✅ {bytes_freed/1024/1024:.1f} MB\n\n"
-                    "Your storage is now optimized! 🚀"
-                )
-            else:
-                await self._safe_edit_message(
-                    status_message,
-                    "✨ CLEANUP STATUS\n"
-                    "==============================\n\n"
-                    "📊 STORAGE CHECK\n"
-                    "------------------------------\n"
-                    "✅ Storage is already clean!\n"
-                    "No media files need cleanup."
-                )
-                
-        except Exception as e:
-            logger.error(f"Cleanup failed: {e}")
-            await self._safe_edit_message(
-                status_message,
-                "⛔️ CLEANUP ERROR\n"
-                "==============================\n\n"
-                "❌ Operation Failed\n"
-                "------------------------------\n"
-                f"Error: {str(e)}\n\n"
-                "Please try again later."
-            )
-        
-    def _extract_urls_from_text(self, text: str) -> List[str]:
-        """Extract URLs from text message using pre-compiled pattern."""
-        return URL_PATTERN.findall(text)
-        
-    def _schedule_cleanup(self) -> None:
-        """Schedule periodic cleanup of downloads directory"""
-        async def scheduled_cleanup():
-            try:
-                dirs_removed, bytes_freed = self.cleanup_service.cleanup_old_directories()
-                if dirs_removed > 0:
-                    logger.info(f"Cleanup: Removed {dirs_removed} directories, freed {bytes_freed/1024/1024:.2f} MB")
-            except Exception as e:
-                logger.error(f"Scheduled cleanup failed: {e}")
-        
-        self.bot_app.job_queue.run_repeating(scheduled_cleanup, interval=24*60*60)
-
-    async def _initialize_database(self) -> None:
-        """Initialize database with connection pooling."""
-        self.services.database_service = DatabaseService(self.config.database)
-        await self.services.database_service.initialize()
-
-    async def _initialize_telegram(self) -> None:
-        """Initialize Telegram clients with persistent session management."""
-        # Initialize session storage with phone number
-        self.telegram_session_storage = TelegramSessionStorage(
-            self.services.database_service,
-            self.config.downloads_path / "sessions",
-            phone_number=self.config.telegram.phone_number
-        )
-
-        # Try to get existing session first
-        stored_session = await self.telegram_session_storage.get_active_session()
-
-        if stored_session and await self._validate_existing_session(stored_session):
-            logger.info("Using existing Telegram session")
-            session_file_path = Path(stored_session['session_file_path'])
-        else:
-            logger.info("No valid existing session, creating new one")
-            session_file_path = await self._create_new_telegram_session()
-
-        # Initialize bot application with optimized settings
-        self.bot_app = Application.builder().token(
-            self.config.telegram.bot_token
-        ).connect_timeout(
-            self.config.telegram.connection_timeout
-        ).read_timeout(
-            self.config.telegram.read_timeout
-        ).write_timeout(
-            self.config.telegram.bot_api_timeout
-        ).pool_timeout(
-            self.config.telegram.connection_timeout
-        ).build()
-
-        # Register command handlers
-        self.bot_app.add_handler(CommandHandler("start", self.handle_start))
-        self.bot_app.add_handler(CommandHandler("help", self.handle_help))
-        self.bot_app.add_handler(CommandHandler("stats", self.handle_stats))
-        self.bot_app.add_handler(CommandHandler("cleanup", self.handle_cleanup))
-        self.bot_app.add_handler(CommandHandler("metrics", metrics_command))
-        self.bot_app.add_handler(CommandHandler("telegram_status", self.handle_telegram_session_status))
-        self.bot_app.add_handler(CommandHandler("auth", self.handle_auth))
-
-        # Session management handlers for Instagram
-        self.bot_app.add_handler(CommandHandler("session_upload", self. handle_session_upload_start))
-        self.bot_app.add_handler(MessageHandler(
-            filters.Document.ALL & ~filters.COMMAND,
-            self.handle_session_file_upload,
-            block=False
-        ))
-        self.bot_app.add_handler(CommandHandler("session_list", self.   handle_session_list))
-        self.bot_app.add_handler(CallbackQueryHandler(
-            self.handle_session_button, 
-            pattern=r'^(activate|delete)_session_\d+$'
-        ))
-
-        # URL handling
-        self.bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.  handle_message))
-
-        # Initialize Telethon with the persistent session
-        session_name = str(session_file_path).replace('.session', '')
-        self.telethon_client = TelegramClient(
-            session_name,
-            self.config.telegram.api_id,
-            self.config.telegram.api_hash,
-            connection_retries=self.config.telegram.network_retry_attempts,
-            retry_delay=self.config.telegram.flood_control_base_delay,
-            auto_reconnect=True
-        )
-
-        await self.telethon_client.start()
-
-        # Update session usage
-        if stored_session:
-            await self.telegram_session_storage.update_session_usage(stored_session ['id'])
-
-    async def _validate_existing_session(self, session: Dict[str, Any]) -> bool:
-        """Validate that an existing session is still usable."""
-        try:
-            return await self.telegram_session_storage.validate_stored_session(
-                self.config.telegram.api_id,
-                self.config.telegram.api_hash
-            )
-        except Exception as e:
-            logger.warning(f"Session validation failed: {e}")
-            return False
-
-    async def _create_new_telegram_session(self) -> Path:
-        """Create a new Telegram session non-interactively using stored phone number."""
-        import tempfile
-        from src.core.auth_exceptions import TelegramAuthenticationRequired
-
-        if not self.config.telegram.phone_number:
-            raise RuntimeError("Phone number not configured. Please add phone_number to telegram config.")
-
-        # Create temporary session for initial login
-        with tempfile.NamedTemporaryFile(suffix='.session', delete=False) as temp_file:
-            temp_session_path = Path(temp_file.name)
-
-        temp_session_name = str(temp_session_path).replace('.session', '')
-        phone_number = self.config.telegram.phone_number.lstrip('+')
-
-        try:
-            # Create temporary client for authentication
-            temp_client = TelegramClient(
-                temp_session_name,
-                self.config.telegram.api_id,
-                self.config.telegram.api_hash
-            )
-
-            logger.info("Starting Telegram authentication...")
-            async def phone_callback():
-                return phone_number
-
-            # Store the paths in our instance for the auth completion handler
-            self._auth_temp_session = {
-                'path': temp_session_path,
-                'name': temp_session_name,
-                'client': temp_client,
-                'phone': phone_number
-            }
-
-            # This will trigger the code request but won't complete auth
-            await temp_client.connect()
-            await temp_client.send_code_request(phone_number)
-
-            # Raise an exception to indicate auth is needed
-            raise TelegramAuthenticationRequired(
-                "Telegram verification code required. Use /auth <code> to complete setup."
-            )
-
-        except TelegramAuthenticationRequired:
-            raise
-
-        except Exception as e:
-            logger.error(f"Failed to create Telegram session: {e}")
-            raise
-
-    async def complete_telegram_auth(self, code: str) -> Path:
-        """Complete the Telegram authentication process with the provided code."""
-        if not hasattr(self, '_auth_temp_session'):
-            raise RuntimeError("No authentication in progress. Please start over.")
-
-        try:
-            temp_data = self._auth_temp_session
-            temp_client = temp_data['client']
-            phone_number = temp_data['phone']
-
-            # Sign in with the provided code
-            await temp_client.sign_in(phone_number, code)
-
-            # Get user info
-            me = await temp_client.get_me()
-            if not me:
-                raise RuntimeError("Could not get user info after authentication")
-
-            user_info = {
-                "id": me.id,
-                "first_name": me.first_name,
-                "last_name": me.last_name,
-                "username": me.username,
-                "phone": phone_number
-            }
-
-            logger.info(f"Authenticated as {me.first_name} ({phone_number})")
-
-            # Disconnect temporary client
-            await temp_client.disconnect()
-
-            # Store the session permanently
-            session_id = await self.telegram_session_storage.store_telegram_session(
-                temp_data['path'],
-                phone_number,
-                user_info
-            )
-
-            # Get the stored session path
-            stored_path = self.telegram_session_storage.get_session_file_path()
-            logger.info(f"Telegram session stored successfully with ID {session_id}")
-
-            # Clear the temporary session data
-            del self._auth_temp_session
-
-            return stored_path
-
-        except Exception as e:
-            logger.error(f"Failed to complete Telegram authentication: {e}")
-            raise
-
-        finally:
-            # Clean up temporary files
-            try:
-                temp_path = self._auth_temp_session['path']
-                temp_name = self._auth_temp_session['name']
-                for path in [temp_path, Path(f"{temp_name}.session")]:
-                    if path.exists():
-                        try:
-                            path.unlink()
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-    async def handle_auth(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /auth command to complete Telegram authentication."""
-        if not update.message or not update.effective_user:
-            return
-
-        # Only allow admin users to use this command
-        user_id = update.effective_user.id
-        if str(user_id) not in self.config.admin_user_ids:
-            await update.message.reply_text(
-                "⚠️ ACCESS DENIED\n"
-                "==============================\n\n"
-                "❌ Error: Unauthorized Access\n"
-                "------------------------------\n"
-                "This command is for admins only."
-            )
-            return
-
-        # Check command format
-        args = context.args
-        if not args:
-            await update.message.reply_text(
-                "🔐 TELEGRAM AUTHENTICATION\n"
-                "==============================\n\n"
-                "📱 Verification Code\n"
-                "------------------------------\n"
-                "Please provide the code you received:\n"
-                "/auth <code>\n\n"
-                "Example: /auth 12345"
-            )
-            return
-
-        code = args[0]
-        phone_number = self.config.telegram.phone_number.lstrip('+')
-
-        try:
-            # Get current authentication state
-            auth_state = await self.telegram_session_storage.get_auth_state(phone_number)
-            if not auth_state:
-                await update.message.reply_text(
-                    "⚠️ AUTHENTICATION ERROR\n"
-                    "==============================\n\n"
-                    "❌ No Active Authentication\n"
-                    "------------------------------\n"
-                    "Please wait for a code request first."
-                )
-                return
-
-            # Create temporary session
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.session', delete=False) as temp_file:
-                temp_session_path = Path(temp_file.name)
-
-            try:
-                # Sign in with code
-                client = TelegramClient(
-                    str(temp_session_path),
-                    self.config.telegram.api_id,
-                    self.config.telegram.api_hash
-                )
-
-                await client.connect()
-                await client.sign_in(
-                    phone=phone_number,
-                    code=code,
-                    phone_code_hash=auth_state['phone_code_hash']
-                )
-
-                # Get user info
-                me = await client.get_me()
-                if not me:
-                    raise RuntimeError("Could not get user info after authentication")
-
-                user_info = {
-                    "id": me.id,
-                    "first_name": me.first_name,
-                    "last_name": me.last_name,
-                    "username": me.username,
-                    "phone": phone_number
-                }
-
-                await client.disconnect()
-
-                # Store the session permanently
-                session_id = await self.telegram_session_storage.store_telegram_session(
-                    temp_session_path,
-                    phone_number,
-                    user_info
-                )
-
-                # Clear authentication state
-                await self.telegram_session_storage.clear_auth_state(phone_number)
-
-                await update.message.reply_text(
-                    "✅ AUTHENTICATION SUCCESS\n"
-                    "==============================\n\n"
-                    "🔐 Session Status\n"
-                    "------------------------------\n"
-                    f"• 👤 User: {me.first_name}\n"
-                    f"• 📱 Phone: +{phone_number}\n"
-                    f"• 🔑 Session ID: {session_id}\n\n"
-                    "Bot is ready to use!"
-                )
-
-            finally:
-                # Clean up temporary files
-                if temp_session_path.exists():
-                    temp_session_path.unlink()
-
-        except Exception as e:
-            logger.error(f"Authentication failed: {e}")
-            await update.message.reply_text(
-                "❌ AUTHENTICATION FAILED\n"
-                "==============================\n\n"
-                "⚠️ Error Details\n"
-                "------------------------------\n"
-                f"Error: {str(e)}\n\n"
-                "Please try again or contact support."
-            )
-
-    async def handle_telegram_session_status(self, update: Update, context:     ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /telegram_status command to show Telegram session status."""
-        try:
-            session = await self.telegram_session_storage.get_active_session()
-
-            if not session:
-                await update.message.reply_text(
-                    "⛔️ NO ACTIVE SESSION\n"
-                    "==============================\n\n"
-                    "❌ Session Error\n"
-                    "------------------------------\n"
-                    "No active Telegram session found.\n"
-                    "This should not occur during normal operation.\n"
-                    "Please check the bot's configuration."
-                )
-                return
-
-            session_data = session.get('session_data', {})
-            user_info = session_data.get('user_info', {})
-
-            response = "📱 **Telegram Session Status**\n\n"
-            response += f"✅ **Status:** Active\n"
-            response += f"📞 **Phone:** {session['phone_number']}\n"
-            response += f"👤 **Name:** {user_info.get('first_name', 'Unknown')}"
-
-            if user_info.get('username'):
-                response += f" (@{user_info['username']})"
-
-            response += f"\n📅 **Created:** {session['created_at'][:10]}\n"
-            response += f"🔄 **Last Used:** {session_data.get('last_used', 'Unknown')   [:19]}\n"
-
-            # Check if session file exists
-            session_file = Path(session['session_file_path'])
-            if session_file.exists():
-                file_size = session_file.stat().st_size
-                response += f"📁 **File Size:** {file_size} bytes\n"
-            else:
-                response += "⚠️ **Warning:** Session file not found on disk\n"
-
-            await update.message.reply_text(response, parse_mode='Markdown')
-
-        except Exception as e:
-            logger.error(f"Failed to get session status: {e}")
-            await update.message.reply_text(
-                "⛔️ STATUS CHECK ERROR\n"
-                "==============================\n\n"
-                "❌ Operation Failed\n"
-                "------------------------------\n"
-                "Could not retrieve session status.\n"
-                "Please check the system logs for details."
-            )
-
-    async def _initialize_uploaders(self) -> None:
-        """Initialize upload services with optimized configuration."""
-        self.services.file_service = FileUploadService(self.config.upload)
-        
-        # Configure uploaders with optimal settings
-        bot_api_uploader = BotAPIUploader(
-            self.config.telegram.bot_token,
-            self.config.telegram.target_chat_id,
-        )
-        
-        telethon_uploader = TelethonUploader(
-            self.telethon_client,
-            self.config.telegram.target_chat_id,
-            self.config.telegram.api_id,
-            self.config.telegram.api_hash
-        )
-        
-        # Register uploaders
-        self.services.file_service.register_uploader('bot_api', bot_api_uploader)
-        self.services.file_service.register_uploader('telethon', telethon_uploader)
-
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle messages containing Instagram URLs with enhanced detection."""
-        # Get text from either message or caption
-        message = update.message or update.channel_post
-        if not message:
-            return
-            
-        text = message.text or message.caption
-        if not text:
-            return
-            
-        text = text.strip()
-        logger.info("Received message", text=text, chat_id=message.chat_id, chat_type=message.chat.type)
-        
-        # Extract all potential URLs from the message
-        urls = self._extract_urls_from_text(text)
-        
-        # Process each Instagram URL found
-        for url in urls:
-            if self.detector.is_instagram_url(url):
-                # Normalize the URL
-                normalized_url = self.detector.normalize_url(url)
-                
-                # Detect content type
-                content_type, identifier, secondary = self.detector.detect_content_type(normalized_url)
-                
-                logger.info(f"Processing Instagram {content_type}", 
-                          url=normalized_url, 
-                          identifier=identifier,
-                          chat_id=message.chat_id,
-                          chat_type=message.chat.type)
-                
-                await self._process_download(update, normalized_url, content_type, identifier, secondary)
-                break  # Process only the first Instagram URL to avoid spam
-
     def _setup_handlers(self) -> None:
-        """Set up command handlers and message handlers."""
-        # Add message handler for Instagram URLs with enhanced pattern matching first
-        # This ensures URL processing takes precedence over other handlers
+    # Set up command handlers and message handlers
+        # Core command handlers
+        self.bot_app.add_handler(CommandHandler("start", self._start_command))
+        self.bot_app.add_handler(CommandHandler("help", self.help_command))
+        self.bot_app.add_handler(CommandHandler("metrics", metrics_command))
+        
+        # Session management handlers
+        self.bot_app.add_handler(CommandHandler("session_upload", self.handle_session_upload))
+        self.bot_app.add_handler(CommandHandler("session_list", self.handle_session_list))
+        self.bot_app.add_handler(
+            MessageHandler(filters.Document.ALL & ~filters.COMMAND, self.handle_session_upload)
+        )
+        self.bot_app.add_handler(
+            CallbackQueryHandler(
+                self.handle_session_button,
+                pattern=r'^(activate|delete)_session_\d+$'
+            )
+        )
+        self.bot_app.add_handler(
+            MessageHandler(filters.Document.ALL & ~filters.COMMAND, self.handle_session_upload)
+        )
+        self.bot_app.add_handler(
+            CallbackQueryHandler(
+                self.handle_session_button, 
+                pattern=r'^(activate|delete)_session_\d+$'
+            )
+        )
+
+        # URL handling for Instagram links
         self.bot_app.add_handler(
             MessageHandler(
                 (filters.TEXT | filters.CAPTION) &  # Handle both text messages and captions
@@ -909,882 +697,181 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             ),
             group=-1  # Highest priority group
         )
-        
-        # Register command handlers after URL handler
-        handlers = [
-            ("start", self.handle_start),
-            ("stats", self.handle_stats),
-            ("instagram", self.handle_download_instagram),
-            ("detect", self.handle_detect_url)
-        ]
-        
-        # Add command handlers with group support
-        for command, handler in handlers:
-            self.bot_app.add_handler(
-                CommandHandler(
-                    command,
-                    handler,
-                    filters=filters.ChatType.GROUPS | filters.ChatType.PRIVATE
-                )
-            )
 
-    async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /start command with enhanced content type information."""
+    async def initialize(self) -> None:
+    # Initialize the bot and all its services
+        try:
+            # Initialize components sequentially
+            await self._initialize_database()
+            await self._initialize_telegram()
+            self._initialize_instagram()
+            await self._initialize_uploaders()
+
+            logger.info("Bot initialized successfully")
+
+        except Exception as e:
+            logger.error("Failed to initialize bot", error=str(e))
+            raise
+
+    async def _initialize_database(self) -> None:
+    # Initialize database connection and schema
+        if self.services.database_service:
+            try:
+                await self.services.database_service.initialize()
+                logger.info("Database initialized successfully")
+            except Exception as e:
+                logger.error("Failed to initialize database", exc_info=True)
+                raise
+
+    async def _initialize_telegram(self) -> None:
+    # Initialize Telegram bot application
+        try:
+            # Create Telegram bot application
+            self.bot_app = Application.builder().token(self.config.telegram.bot_token).build()
+            # Set up handlers
+            self._setup_handlers()
+            logger.info("Telegram bot initialized successfully")
+        except Exception as e:
+            logger.error("Failed to initialize Telegram bot", exc_info=True)
+            raise
+            
+    async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Handle /start command
         await update.message.reply_text(
-            f"� WELCOME TO INSTAGRAM BOT v{BOT_VERSION}\n"
-            "==============================\n"
-            f"� {datetime.now().strftime('%b %d, %Y at %I:%M %p')}\n\n"
-
-            "🎯 QUICK START GUIDE\n"
-            "------------------------------\n"
-            "Simply paste any Instagram URL!\n"
-            "I'll handle the rest automatically.\n\n"
-
-            "📥 CONTENT DETECTION\n"
-            "------------------------------\n"
-            "├─ 📷 Posts & Carousels\n"
-            "├─ 🎬 Reels & IGTV\n"
-            "├─ 📱 Stories (requires login)\n"
-            "├─ ⭐ Highlights (requires login)\n"
-            "╰─ 👤 Profile scraping\n\n"
-
-            "⚡ SUPPORTED URLS\n"
-            "------------------------------\n"
-            "├─ instagram.com/p/... \n"
-            "├─ instagram.com/reel/...\n"
-            "├─ instagram.com/stories/...\n"
-            "├─ instagram.com/stories/highlights/...\n"
-            "├─ instagram.com/username\n"
-            "╰─ instagram.com/tv/...\n\n"
-
-            "�️ AVAILABLE COMMANDS\n"
-            "------------------------------\n"
-            "├─ /instagram <url> - Direct download\n"
-            "├─ /detect <url> - URL analysis\n"
-            "├─ /stats - View statistics\n"
-            "├─ /metrics - Performance data\n"
-            "├─ /cleanup - Clear cache\n"
-            "╰─ /help - Show full guide\n\n"
-
-            "⚠️ IMPORTANT NOTES\n"
-            "------------------------------\n"
-            "├─ Login required for Stories\n"
-            "├─ Login required for Highlights\n"
-            "╰─ Use /session_upload to login"
+            "👋 Welcome! Send me Instagram links and I'll download the content for you.\n"
+            "Use /help to see all available commands."
         )
 
-    async def handle_detect_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /detect command to test URL detection."""
-        if not context.args:
-            await update.message.reply_text(
-                "Please provide an Instagram URL to test detection.\n"
-                "Usage: /detect <url>"
-            )
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        # Handle /help command
+        help_text = (
+            "📚 *Available Commands*\n\n"
+            "/start - Start the bot\n"
+            "/help - Show this help message\n"
+            "/metrics - Show bot statistics\n"
+            "/session_upload - Upload a new Instagram session\n"
+            "/session_list - List all saved sessions\n\n"
+            "Just send me an Instagram link and I'll download it for you!\n\n"
+            "*Supported Content*:"
+            "\n- Posts (photos/videos)"
+            "\n- Stories"
+            "\n- Reels"
+            "\n- IGTV Videos"
+            "\n- Profile Pictures"
+        )
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+        
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Handle messages containing Instagram URLs
+        message = update.message or update.channel_post
+        if not message:
             return
-
-        url = context.args[0]
+            
+        text = message.text or message.caption or ""
+        urls = re.findall(INSTAGRAM_URL_PATTERN, text)
         
-        if not self.detector.is_instagram_url(url):
-            await update.message.reply_text("❌ Not a valid Instagram URL")
+        if not urls:
             return
-        
-        normalized_url = self.detector.normalize_url(url)
-        content_type, identifier, secondary = self.detector.detect_content_type(normalized_url)
-        
-        detection_icons = {
-            'post': '📷',
-            'reel': '🎬',
-            'story': '📱',
-            'highlight': '⭐',
-            'profile': '👤',
-            'tv': '📺',
-            'unknown': '❓'
-        }
-        
-        icon = detection_icons.get(content_type, '❓')
-        
-        response = f"🔍 **URL Detection Results:**\n\n"
-        response += f"{icon} **Type:** {content_type.title()}\n"
-        response += f"🔗 **Original URL:** {url}\n"
-        response += f"✨ **Normalized:** {normalized_url}\n"
-        response += f"🎯 **Identifier:** {identifier}\n"
-        
-        if secondary:
-            response += f"📝 **Secondary ID:** {secondary}\n"
-        
-        response += f"\n✅ Ready for download!"
-        
-        await update.message.reply_text(response, parse_mode='Markdown')
-        
-    async def handle_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /stats command with enhanced statistics including content type breakdown."""
-        stats = await self.services.database_service.get_statistics()
-        
-        # Get resource stats
-        resource_stats = await self.resource_manager.get_resource_stats()
-        storage_stats = resource_stats.get('storage', {})
-        
-        # Get content type breakdown if available
-        content_stats = await self.services.database_service.get_content_type_stats()
-        
-        from datetime import datetime
-        
-        response = (
-            "� DOWNLOAD STATISTICS REPORT\n"
-            "==============================\n"
-            f"📅 Report Time: {datetime.now().strftime('%b %d, %Y at %I:%M %p')}\n\n"
             
-            "📥 DOWNLOAD METRICS\n"
-            "------------------------------\n"
-        )
-
-        # Calculate success rates and indicators
-        total_downloads = stats.get('total_downloads', 0)
-        successful_downloads = stats.get('successful_downloads', 0)
-        failed_downloads = stats.get('failed_downloads', 0)
-        success_rate = (successful_downloads / total_downloads * 100) if total_downloads > 0 else 0
-        download_status = "✅" if success_rate > 90 else "⚠️" if success_rate > 70 else "⛔️"
-
-        response += (
-            f"├─ 🎯 Success Rate: {download_status} {success_rate:.1f}%\n"
-            f"├─ ✅ Successful : {successful_downloads:,}\n"
-            f"├─ ❌ Failed    : {failed_downloads:,}\n"
-            f"╰─ 📊 Total     : {total_downloads:,}\n\n"
-            
-            "📁 FILE OPERATIONS\n"
-            "------------------------------\n"
-        )
-
-        # Calculate file metrics and status
-        total_files = stats.get('total_files_downloaded', 0)
-        successful_uploads = stats.get('successful_file_uploads', 0)
-        upload_rate = (successful_uploads / total_files * 100) if total_files > 0 else 0
-        upload_status = "✅" if upload_rate > 90 else "⚠️" if upload_rate > 70 else "⛔️"
+        status_message = await message.reply_text("Processing Instagram URL(s)...")
         
-        total_data_mb = stats.get('total_bytes_downloaded', 0)/1024/1024
-        data_status = "✅" if total_data_mb < 1000 else "⚠️" if total_data_mb < 5000 else "⛔️"
-
-        response += (
-            f"├─ 📤 Upload Rate : {upload_status} {upload_rate:.1f}%\n"
-            f"├─ 💾 Total Files : {total_files:,}\n"
-            f"╰─ 📊 Data Volume : {data_status} {total_data_mb:.1f} MB\n\n"
-        )
-
-        if content_stats:
-            response += (
-                "📋 CONTENT BREAKDOWN\n"
-                "------------------------------\n"
-            )
-            for content_type, count in content_stats.items():
-                icon = {
-                    'post': '📷', 'reel': '🎬', 'story': '📱',
-                    'highlight': '⭐', 'profile': '👤', 'tv': '📺'
-                }.get(content_type, '📄')
-                is_last = content_type == list(content_stats.keys())[-1]
-                prefix = "╰─ " if is_last else "├─ "
-                response += f"{prefix}{icon} {content_type.title():8} : {count:,}\n"
-            response += "\n"
-
-        # Storage section with indicators
-        current_size = storage_stats.get('total_size_mb', 0)
-        total_dirs = storage_stats.get('total_directories', 0)
-        old_dirs = storage_stats.get('old_directories', 0)
-        
-        storage_status = "✅" if current_size < 500 else "⚠️" if current_size < 2000 else "⛔️"
-        dir_ratio = (old_dirs / total_dirs * 100) if total_dirs > 0 else 0
-        dir_status = "✅" if dir_ratio < 10 else "⚠️" if dir_ratio < 30 else "⛔️"
-
-        response += (
-            "💾 STORAGE STATUS\n"
-            "------------------------------\n"
-            f"├─ 📦 Current Size : {storage_status} {current_size:.1f} MB\n"
-            f"├─ 📂 Total Dirs   : {total_dirs:,}\n"
-            f"╰─ 🗑️ Old Dirs     : {dir_status} {old_dirs:,}\n\n"
-            
-            "------------------------------\n"
-            "📊 Status Indicators\n"
-            "✅ Normal | ⚠️ Warning | ⛔️ Critical"
-        )
-        
-        await update.message.reply_text(response, parse_mode='Markdown')
-
-    async def _safe_edit_message(self, message: Message, text: str, retry_after: Optional[int] = None) -> bool:
-        """
-        Safely edit a message with rate limit handling.
-        
-        Args:
-            message (Message): Message to edit
-            text (str): New message text
-            retry_after (Optional[int]): Override for retry delay in seconds
-            
-        Returns:
-            bool: True if edit was successful, False if rate limited
-        """
         try:
-            await message.edit_text(text)
-            return True
-            
-        except telegram_error.RetryAfter as e:
-            retry_after = retry_after or e.retry_after
-            logger.warning(f"Rate limited, waiting {retry_after}s", error=str(e))
-            await asyncio.sleep(retry_after + 1)  # Add 1s buffer
-            
-            try:
-                await message.edit_text(text)
-                return True
-            except Exception:
-                return False
-                
-        except Exception as e:
-            logger.error("Failed to edit message", error=str(e))
-            return False
-
-    @with_circuit_breaker(failure_threshold=5, reset_timeout=300)
-    @with_retry(max_retries=3, exceptions=[ConnectionError, TimeoutError])
-    async def _process_download(self, update: Update, url: str, content_type: str = None, 
-                              identifier: str = None, secondary: str = None) -> None:
-        """Enhanced download processing with content type awareness and resilience."""
-        if not update.effective_user:
-            return
-        status_message = None
-        try:
-            # Auto-detect if not provided
-            if not content_type:
-                content_type, identifier, secondary = self.detector.detect_content_type(url)
-            
-            # Create appropriate status message based on content type
-            content_icons = {
-                'post': '📷',
-                'reel': '🎬', 
-                'story': '📱',
-                'highlight': '⭐',
-                'profile': '👤',
-                'tv': '📺',
-                'unknown': '📄'
-            }
-            
-            icon = content_icons.get(content_type, '📄')
-            content_name = content_type.replace('_', ' ').title()
-            
-            # Send initial status with error handling
-            try:
-                status_message = await update.message.reply_text(
-                    f"{icon} Detected: {content_name}\n⏬ Starting download..."
-                )
-            except telegram_error.RetryAfter as e:
-                # If rate limited on first message, wait and try again
-                await asyncio.sleep(e.retry_after + 1)
-                status_message = await update.message.reply_text(
-                    f"{icon} Detected: {content_name}\n⏬ Starting download..."
-                )
-            
-            # Special handling for different content types with rate limit handling
-            msg_text = ""
-            if content_type == 'profile':
-                msg_text = f"👤 Profile detected: @{identifier}\nNote: Profile downloads will get recent posts. Use specific post URLs for individual content."
-            elif content_type in ['story', 'highlight']:
-                msg_text = f"{icon} Downloading {content_name}...\n📝 Note: Stories/Highlights require Instagram login"
-            elif content_type == 'unknown':
-                msg_text = "❓ Unknown content type detected\n⏬ Attempting download..."
-            else:
-                msg_text = f"{icon} Downloading {content_name}..."
-                
-            await self._safe_edit_message(status_message, msg_text)
-            
-            # Get active session for the user
-            session = await self.session_storage.get_active_session(update.effective_user.id)
-            if not session:
-                await status_message.edit_text(
-                    "❌ No active Instagram session found.\n"
-                    "Please use /session_upload to upload a cookies.txt file "
-                    "or ensure you're logged into Instagram in Firefox."
-                )
-                return
-
-            try:
-                # Initialize downloader with session
-                downloader = InstagramDownloader(
-                    self.config.instagram,
-                    Path(self.config.downloads_path),
-                    cookies_file=Path(session['cookies_file_path']) if session['cookies_file_path'] else None
-                )
-                
-                # Download content
-                downloaded_files = await downloader.download_content(url)
-                
-            except Exception as e:
-                # Try session recovery if download fails
-                logger.warning("Download failed, attempting session recovery", error=str(e))
-                if await self.session_recovery.recover_instagram_session():
-                    # Retry download after session recovery
-                    downloaded_files = await self.instagram_downloader.download_content(url)
-                else:
-                    raise
-                    
-            if not downloaded_files:
-                error_msg = f"❌ Failed to download {content_name.lower()}"
-                if content_type in ['story', 'highlight']:
-                    error_msg += "\n💡 Tip: Make sure you're logged into Instagram for stories/highlights"
-                await self._safe_edit_message(status_message, error_msg)
-                return
-                
-            # Save download state for recovery
-            await self.state_recovery.save_download_state(url, downloaded_files, status_message)
-                
-            await self._safe_edit_message(
-                status_message,
-                f"✅ Downloaded {len(downloaded_files)} files\n📤 Starting upload..."
-            )
-            
-            # Extract metadata for the first file
-            metadata = await self.instagram_downloader._extract_metadata(downloaded_files[0])
-            
-            # Build enhanced caption based on content type
-            caption = self._build_caption(content_type, metadata, len(downloaded_files), url)
-            
-            # Process files with progress updates
-            successful = await self._upload_files_with_progress(
-                downloaded_files, caption, status_message, content_type
-            )
+            for url in urls:
+                try:
+                    # Download the content
+                    files = await self.services.instagram_service.download_post(url)
+                    if not files:
+                        await status_message.edit_text(f"❌ No content found for URL: {url}")
+                        continue
                         
-            # Update final status with content type info
-            final_message = f"{icon} {content_name} processed!\n"
-            final_message += f"📥 Downloaded: {len(downloaded_files)} files\n"
-            final_message += f"📤 Uploaded: {successful}/{len(downloaded_files)} files"
-            
-            if successful == len(downloaded_files):
-                final_message += "\n🎉 All files uploaded successfully!"
-            elif successful > 0:
-                final_message += f"\n⚠️ {len(downloaded_files) - successful} files failed to upload"
-            else:
-                final_message += "\n❌ Upload failed"
-                
-            await self._safe_edit_message(status_message, final_message)
-            
-        except SessionStorageError as se:
-            error_msg = str(se)
-            logger.error("Session error while downloading", url=url, content_type=content_type, error=error_msg)
-            
-            if status_message:
-                content_name = content_type.replace('_', ' ').title() if content_type else 'content'
-                if "Failed to get active session" in error_msg:
-                    await self._safe_edit_message(
-                        status_message,
-                        "❌ No active Instagram session found.\n"
-                        "Please upload a valid session using /session_upload command first."
-                    )
-                else:
-                    await self._safe_edit_message(
-                        status_message,
-                        f"❌ Session error: {error_msg}\n"
-                        "Try uploading a new session using /session_upload"
-                    )
-            
-            await self.services.database_service.log_file_operation(
-                url, 0, 'download', False, f"Session error: {error_msg}"
-            )
+                    await status_message.edit_text(f"📥 Downloading content from: {url}")
+                    
+                    # Upload each file
+                    for file_path in files:
+                        try:
+                            await self.services.file_service.upload_file(
+                                file_path,
+                                message.chat_id,
+                                progress_callback=lambda p: status_message.edit_text(f"⬆️ Uploading... {p}%")
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to upload file {file_path}: {e}")
+                            await status_message.edit_text(f"❌ Failed to upload content: {str(e)}")
+                            
+                except Exception as e:
+                    logger.error(f"Failed to process URL {url}: {e}")
+                    await status_message.edit_text(f"❌ Failed to process URL {url}: {str(e)}")
+                    
+            await status_message.edit_text("✅ All URLs processed!")
             
         except Exception as e:
-            error_msg = str(e)
-            logger.error("Error processing download", url=url, content_type=content_type, error=error_msg)
-            
-            if status_message:
-                content_name = content_type.replace('_', ' ').title() if content_type else 'content'
-                await self._safe_edit_message(status_message, f"❌ Error downloading {content_name}: {error_msg}")
-            
-            await self.services.database_service.log_file_operation(
-                url, 0, 'download', False, error_msg
-            )
+            logger.error(f"Error in handle_message: {e}")
+            await status_message.edit_text(f"❌ An error occurred: {str(e)}")
 
-    def _build_caption(self, content_type: str, metadata: dict, file_count: int, url: str) -> str:
-        """Build enhanced caption based on content type and metadata."""
-        caption = ""
-        
-        # Add content type header
-        type_headers = {
-            'post': '📷 Instagram Post',
-            'reel': '🎬 Instagram Reel', 
-            'story': '📱 Instagram Story',
-            'highlight': '⭐ Instagram Highlight',
-            'profile': '👤 Instagram Profile',
-            'tv': '📺 Instagram TV'
-        }
-        
-        if content_type in type_headers:
-            caption += f"{type_headers[content_type]}\n"
-        
-        # Add user info
-        if metadata.get('username'):
-            caption += f"👤 @{metadata['username']}\n"
-        
-        # Add content description
-        if metadata.get('caption'):
-            # Truncate very long captions
-            content_caption = metadata['caption']
-            if len(content_caption) > 300:
-                content_caption = content_caption[:297] + "..."
-            caption += f"\n{content_caption}\n"
-        
-        # Add statistics
-        caption += f"\n📱 Total media: {file_count}\n"
-        
-        if metadata.get('likes'):
-            caption += f"❤️ {metadata['likes']:,} likes\n"
-        if metadata.get('comments'):
-            caption += f"💬 {metadata['comments']:,} comments\n"
-        if metadata.get('views'):
-            caption += f"👀 {metadata['views']:,} views\n"
-        
-        # Add source URL
-        caption += f"\n🔗 {url}"
-        
-        return caption
-
-    @with_circuit_breaker(failure_threshold=5, reset_timeout=300)
-    @with_retry(
-        max_retries=3,
-        exceptions=[ConnectionError, TimeoutError, telegram_error.RetryAfter],
-        initial_delay=1.0,
-        max_delay=60.0,
-        backoff_factor=2.0,
-        jitter=True
-    )
-    async def _upload_files_with_progress(
-        self, 
-        files: List[Path], 
-        caption: str,
-        status_message: Message, 
-        content_type: str
-    ) -> int:
-        """
-        Upload files with progress tracking, content type awareness, and resilience.
-        
-        Args:
-            files (List[Path]): List of files to upload
-            caption (str): Base caption for media files
-            status_message (Message): Message to update with progress
-            content_type (str): Type of content being uploaded
-            
-        Returns:
-            int: Number of successfully uploaded files
-            
-        Note:
-            Files are uploaded in batches to optimize performance and handle rate limits
-            with automatic retries and circuit breaker protection
-        """
-        successful = 0
-        batch_size = self.config.upload.batch_size
-        total_files = len(files)
-        retry_delay = 1  # Start with 1 second delay between uploads
-        
-        for i in range(0, len(files), batch_size):
-            try:
-                batch = files[i:i + batch_size]
-                batch_start = i + 1
-                batch_end = min(i + batch_size, total_files)
-                
-                # Update progress with rate limit handling
-                await self._safe_edit_message(
-                    status_message,
-                    f"📤 Uploading files {batch_start}-{batch_end}/{total_files}..."
-                )
-                
-                # Upload files sequentially for better rate limit handling
-                for idx, file in enumerate(batch, start=i+1):
-                    file_size = file.stat().st_size
-                    uploader = self._get_uploader(file_size)
-                    
-                    # Create file-specific caption
-                    if idx == 1:
-                        file_caption = f"{caption}\n\n📌 Media {idx}/{total_files}"
-                    else:
-                        file_caption = f"Media {idx}/{total_files}"
-                        if content_type in ['post', 'reel'] and total_files > 1:
-                            file_caption += f" - Part of {content_type}"
-                    
-                    # Try to upload with retries
-                    max_retries = 3
-                    for retry in range(max_retries):
-                        try:
-                            result = await self.services.file_service.upload_file(
-                                file,
-                                method=uploader,
-                                caption=file_caption
-                            )
-                            
-                            # Process result
-                            if result:
-                                successful += 1
-                                retry_delay = max(1, retry_delay / 2)  # Decrease delay on success
-                            else:
-                                retry_delay = min(60, retry_delay * 2)  # Double delay on failure
-                            
-                            # Log operation
-                            await self.services.database_service.log_file_operation(
-                                str(file),
-                                file.stat().st_size,
-                                'upload',
-                                bool(result),
-                                None if result else "Upload failed"
-                            )
-                            
-                            break  # Success, no need to retry
-                            
-                        except telegram_error.RetryAfter as e:
-                            if retry < max_retries - 1:
-                                logger.warning(
-                                    f"Rate limited on file {idx}, waiting {e.retry_after}s",
-                                    retry=retry+1,
-                                    file=str(file)
-                                )
-                                # Update status to inform user
-                                await self._safe_edit_message(
-                                    status_message,
-                                    f"⏳ Rate limited, waiting {e.retry_after}s...\n"
-                                    f"📤 Uploading files {batch_start}-{batch_end}/{total_files}"
-                                )
-                                await asyncio.sleep(e.retry_after + 1)
-                                retry_delay = e.retry_after  # Use the server's suggested delay
-                                continue
-                            else:
-                                raise  # Max retries reached
-                                
-                        except Exception as e:
-                            logger.error(
-                                f"Upload error on file {idx}",
-                                error=str(e),
-                                file=str(file)
-                            )
-                            # Log failed operation
-                            await self.services.database_service.log_file_operation(
-                                str(file),
-                                file.stat().st_size,
-                                'upload',
-                                False,
-                                str(e)
-                            )
-                            break  # Skip this file
-                            
-                    # Wait between files to avoid rate limits
-                    if idx < batch_end:
-                        await asyncio.sleep(retry_delay)
-                        
-            except telegram_error.RetryAfter as e:
-                logger.warning(
-                    f"Batch upload rate limited, waiting {e.retry_after}s",
-                    batch_start=batch_start,
-                    batch_end=batch_end
-                )
-                await self._safe_edit_message(
-                    status_message,
-                    f"⏳ Rate limited, waiting {e.retry_after}s before next batch..."
-                )
-                await asyncio.sleep(e.retry_after + 1)
-                retry_delay = e.retry_after
-                i -= batch_size  # Retry this batch
-                continue
-                
-            except Exception as e:
-                logger.error("Batch upload failed", error=str(e))
-                await self._safe_edit_message(
-                    status_message,
-                    f"⚠️ Error uploading batch {batch_start}-{batch_end}: {str(e)}"
-                )
-                continue
-                
-        return successful
-
-    async def handle_download_instagram(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Process Instagram URLs with enhanced detection and feedback."""
-        if not context.args:
-            await update.message.reply_text(
-                "🔗 Please provide an Instagram URL.\n"
-                "Usage: /instagram <url>\n\n"
-                "🎯 **Supported content:**\n"
-                "• 📷 Posts & Carousels\n"
-                "• 🎬 Reels & IGTV\n"
-                "• 📱 Stories (login required)\n"
-                "• ⭐ Highlights (login required)\n"
-                "• 👤 Profiles\n\n"
-                "💡 **Tip:** You can also just paste URLs directly!"
-            )
-            return
-
-        url = context.args[0]
-        
-        # Validate Instagram URL
-        if not self.detector.is_instagram_url(url):
-            await update.message.reply_text(
-                "❌ Invalid Instagram URL\n\n"
-                "Please provide a valid Instagram URL like:\n"
-                "• instagram.com/p/...\n"
-                "• instagram.com/reel/...\n"
-                "• instagram.com/stories/..."
-            )
-            return
-        
-        # Normalize and detect
-        normalized_url = self.detector.normalize_url(url)
-        content_type, identifier, secondary = self.detector.detect_content_type(normalized_url)
-        
-        await self._process_download(update, normalized_url, content_type, identifier, secondary)
-
-
-
-    async def handle_session_upload_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Start the session upload process and wait for file."""
-        if not update.effective_user:
-            return
-
-        if context.user_data.get('waiting_for_cookie_file'):
-            # Already waiting for a file
-            await update.message.reply_text(
-                "⚠️ I'm already waiting for your cookie file.\n"
-                "Please upload it or wait for the current session to timeout.",
-                parse_mode='Markdown'
-            )
-            return
-            
-        # Start waiting for file
-        context.user_data['waiting_for_cookie_file'] = True
-        context.user_data['cookie_upload_expires'] = time.time() + 30
-        
-        # Send instructions
-        status_message = await update.message.reply_text(
-            "📤 **Upload Instagram Cookie File**\n\n"
-            "🕒 You have 30 seconds to send your `cookies.txt` file.\n\n"
-            "🔍 **Instructions:**\n"
-            "1. Use a cookie exporter extension to save Instagram cookies\n"
-            "2. Export in Netscape format as 'cookies.txt'\n"
-            "3. Upload the file here\n\n"
-            "⚠️ File must be in Netscape cookie format and contain Instagram cookies.\n"
-            "⏳ Waiting for file...",
-            parse_mode='Markdown'
-        )
-        
-        # Store message ID for timeout handling
-        context.user_data['status_message_id'] = status_message.message_id
-        context.user_data['status_chat_id'] = status_message.chat_id
-        
-        # Schedule timeout
-        async def timeout_handler():
-            await asyncio.sleep(30)
-            try:
-                if context.user_data.get('waiting_for_cookie_file'):
-                    context.user_data.pop('waiting_for_cookie_file', None)
-                    context.user_data.pop('cookie_upload_expires', None)
-                    
-                    # Try to edit the original message
-                    try:
-                        await context.bot.edit_message_text(
-                            chat_id=context.user_data['status_chat_id'],
-                            message_id=context.user_data['status_message_id'],
-                            text="⌛ Session upload timed out.\nUse /session_upload to try again."
-                        )
-                    except Exception:
-                        pass  # Message might have been deleted or edited
-            except Exception as e:
-                logger.error(f"Error in timeout handler: {e}")
-                
-        asyncio.create_task(timeout_handler())
-
-    async def handle_session_file_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle cookie file upload after /session_upload command."""
-        user = update.effective_user
-        
-        # Ignore if we're not waiting for a file from this user
-        if not context.user_data.get('waiting_for_cookie_file'):
-            return
-        
-        # Check if upload window expired
-        if time.time() > context.user_data.get('cookie_upload_expires', 0):
-            # Clean up user data
-            context.user_data.pop('waiting_for_cookie_file', None)
-            context.user_data.pop('cookie_upload_expires', None)
-            
-            await update.message.reply_text(
-                "⌛ Upload window expired. Please use /session_upload to try again."
-            )
-            return
-
-        # Send initial status
-        status_message = await update.message.reply_text(
-            "⏳ Downloading and validating cookie file..."
-        )
-
+    def _initialize_instagram(self) -> None:
+    # Initialize Instagram services
         try:
-            # Clear waiting flags after status message to allow edits if needed
-            context.user_data.pop('waiting_for_cookie_file', None)
-            context.user_data.pop('cookie_upload_expires', None)
-            context.user_data.pop('status_message_id', None)
-            context.user_data.pop('status_chat_id', None)
-
-            # Download the file
-            file = await context.bot.get_file(update.message.document.file_id)
-            
-            # Create user-specific cookie file paths
-            cookies_dir = self.config.downloads_path / 'cookies'
-            user_cookie_dir = cookies_dir / str(user.id)
-            user_cookie_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create temp and final paths
-            temp_cookie_file = user_cookie_dir / f"temp_cookies_{int(time.time())}.txt"
-            final_cookie_file = user_cookie_dir / "cookies.txt"
-            
-            await file.download_to_drive(temp_cookie_file)
-
-            try:
-                # Create temporary session manager for validation
-                temp_session_manager = InstagramSessionManager(
-                    downloads_path=self.config.downloads_path,
-                    cookies_file=temp_cookie_file
-                )
-
-                # Load and validate the cookies
-                await self._safe_edit_message(status_message, "🔍 Validating cookies...")
-                # Load and validate cookies
-                session_cookies = await temp_session_manager.load_cookies_from_file(temp_cookie_file)
-
-                # Try an Instagram API call to verify the session
-                is_valid, message = await temp_session_manager._test_session()
-                
-                if not is_valid:
-                    if temp_cookie_file.exists():
-                        temp_cookie_file.unlink()
-                    await self._safe_edit_message(
-                        status_message,
-                        f"❌ Invalid cookies: {message}\n\n"
-                        "Please ensure you're logged into Instagram and try exporting cookies again."
-                    )
-                    return
-                    
-                # Clean up any existing sessions for this user
-                await self._safe_edit_message(status_message, "⏳ Managing sessions...")
-
-                # Store the session in the database
-                username = session_cookies.get('ds_user_id', 'unknown')  # Get username from cookies
-                
-                # Move temp cookie file to permanent location
-                if final_cookie_file.exists():
-                    final_cookie_file.unlink()  # Remove old cookie file if exists
-                    logger.info(f"Removed existing cookie file for user {user.id}")
-                temp_cookie_file.rename(final_cookie_file)  # Move temp file to permanent location
-                logger.info(f"Created new cookie file at {final_cookie_file}")
-
-                # Clean up any leftover temp files
-                for temp_file in user_cookie_dir.glob("temp_cookies_*.txt"):
-                    if temp_file != final_cookie_file:
-                        try:
-                            temp_file.unlink()
-                            logger.info(f"Cleaned up temporary cookie file: {temp_file}")
-                        except Exception as e:
-                            logger.warning(f"Failed to clean up temporary file {temp_file}: {e}")
-                
-                # Create JSON-serializable session data
-                session_data = {
-                    "status": "valid",
-                    "last_checked": datetime.now().isoformat(),
-                    "cookie_file": str(final_cookie_file)
-                }
-                
-                session_id = await self.services.session_storage.store_session(
-                    user_id=user.id,
-                    username=username,
-                    session_type='cookie_file',
-                    session_data=session_data,
-                    cookies_file_path=final_cookie_file,
-                    make_active=True
-                )
-
-                # Log session validation
-                await self.services.database_service.log_session_validation(
-                    session_id, True
-                )
-
-                await self._safe_edit_message(
-                    status_message,
-                    "✅ Session validated and stored successfully!\n\n"
-                    "You can now use this bot to download Instagram content.\n"
-                    "Use /session_list to manage your sessions."
-                )
-
-            except Exception as e:
-                error_msg = str(e)
-                await self._safe_edit_message(
-                    status_message,
-                    f"❌ Session validation failed: {error_msg}\n\n"
-                    "Please ensure your cookies are valid and try again."
-                )
-                logger.error(f"Session validation failed for user {user.id}: {error_msg}")
-                if temp_cookie_file.exists():
-                    temp_cookie_file.unlink()
-
+            # Instagram service is already initialized in the constructor
+            if self.services.instagram_service:
+                logger.info("Instagram service initialized successfully")
         except Exception as e:
-            error_msg = str(e)
-            await self._safe_edit_message(
-                status_message,
-                f"❌ Failed to process cookie file: {error_msg}"
-            )
-            logger.error(f"Cookie file processing failed for user {user.id}: {error_msg}")
-            if temp_cookie_file.exists():
-                temp_cookie_file.unlink()
+            logger.error("Failed to initialize Instagram service", exc_info=True)
+            raise
+            
+    async def _initialize_uploaders(self) -> None:
+    # Initialize file upload services
+        try:
+            if self.services.file_service:
+                # File service is already initialized in the constructor
+                logger.info("Upload services initialized successfully")
+        except Exception as e:
+            logger.error("Failed to initialize upload services", exc_info=True)
+            raise
 
     async def shutdown(self) -> None:
-        """Shutdown with proper session cleanup."""
+    # Shutdown the bot gracefully
         try:
-            # Stop resource monitoring
-            if hasattr(self, 'resource_manager'):
-                await self.resource_manager.stop_monitoring()
-
-            # Update session usage before shutdown
-            if hasattr(self, 'telegram_session_storage'):
-                session = await self.telegram_session_storage.get_active_session()
-                if session:
-                    await self.telegram_session_storage.update_session_usage(session['id'])
-            
-            # Standard shutdown procedure
-            shutdown_tasks = []
-            
-            if self.bot_app:
-                if self.bot_app.updater:
-                    shutdown_tasks.append(self.bot_app.updater.stop())
-                shutdown_tasks.append(self.bot_app.stop())
-                shutdown_tasks.append(self.bot_app.shutdown())
-            
-            if self.telethon_client:
-                shutdown_tasks.append(self.telethon_client.disconnect())
-            
-            if self.services.database_service:
-                shutdown_tasks.append(self.services.database_service.close())
-            
-            await asyncio.gather(*shutdown_tasks)
-            logger.info("Bot shutdown complete with session preservation")
-            
+            if hasattr(self, 'bot_app'):
+                await self.bot_app.stop()
+            if hasattr(self, 'services'):
+                await self.services.cleanup()
+            logger.info("Bot shutdown complete")
         except Exception as e:
-            logger.error("Error during shutdown", error=str(e))
+            logger.error(f"Error during shutdown: {e}")
 
-async def main() -> None:
-    """
-    Initialize and run the bot with optimized startup sequence.
-    
-    The startup sequence:
-    1. Load configuration
-    2. Create bot instance
-    3. Initialize services
-    4. Start bot application
-    5. Configure cleanup jobs
-    6. Wait for interruption
-    
-    The bot runs until interrupted by CTRL+C or system signal.
-    All cleanup operations are handled in the shutdown sequence.
-    """
+def main() -> int:
+    # Main entry point for the bot.
     from src.core.load_config import load_configuration
     
-    config = load_configuration()
-    bot = EnhancedTelegramBot(config)
+    try:
+        # Load configuration first
+        config = load_configuration()
+        
+        # Set up structured logging with the bot's logging config
+        setup_structured_logging(config.logging)
+        logger = structlog.get_logger(__name__)
+        
+        # Create bot instance with configuration
+        bot = EnhancedTelegramBot(config)
+        
+        # Run the bot
+        asyncio.run(run_bot(bot))
+        return 0
+        
+    except Exception as e:
+        # Get logger for error reporting
+        logger = structlog.get_logger(__name__)
+        # Log error with exception info
+        logger.exception("Fatal error in main loop")
+        return 1
+
+async def run_bot(bot: 'EnhancedTelegramBot') -> None:
+    # Initialize and run the bot with optimized startup sequence.
+    logger = structlog.get_logger(__name__)
     
     try:
         # Initialize all components sequentially
+        logger.info("Initializing bot components...")
         await bot.initialize()
         await bot.bot_app.initialize()
         await bot.bot_app.start()
@@ -1792,46 +879,31 @@ async def main() -> None:
         
         # Schedule cleanup after bot is fully initialized
         bot._schedule_cleanup()
+        logger.info("Bot started successfully")
         
         # Keep the bot running until interrupted
         stop_event = asyncio.Event()
         await stop_event.wait()
+        
     except (KeyboardInterrupt, asyncio.CancelledError):
-        pass
+        logger.info("Bot stopping due to interrupt")
+    except Exception as e:
+        logger.error("Error during bot operation", exc_info=True)
+        raise
     finally:
         # Ensure proper cleanup on shutdown
+        logger.info("Shutting down bot...")
         await bot.shutdown()
+        logger.info("Bot shutdown complete")
 
-def run_bot() -> None:
-    """
-    Run the bot with proper event loop and comprehensive error handling.
-    
-    This function:
-    1. Configures logging
-    2. Sets up the asyncio event loop
-    3. Runs the main bot function
-    4. Handles interruptions and errors gracefully
-    
-    Raises:
-        Exception: Re-raises any unhandled exceptions after logging
-    """
+def run_bot_cli() -> None:
+    # Command-line entry point to run the bot. Configures basic logging and runs the main function.
     try:
-        # Configure logging with timestamp and level information
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        
-        # Run the bot in the asyncio event loop
-        asyncio.run(main())
-        
+        sys.exit(main())
     except KeyboardInterrupt:
+        logger = structlog.get_logger(__name__)
         logger.info("Bot stopped by user")
-        
-    except Exception as e:
-        # Log any unhandled exceptions
-        logger.error(f"Bot error: {e}", exc_info=True)
-        raise  # Re-raise the exception for proper error reporting
+        sys.exit(0)
 
 if __name__ == "__main__":
-    run_bot()
+    run_bot_cli()

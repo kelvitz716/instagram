@@ -4,11 +4,12 @@ from telegram.ext import ContextTypes
 from prometheus_client.parser import text_string_to_metric_families
 from prometheus_client import generate_latest
 
-from .config import ADMIN_USER_IDS
+from .load_config import load_configuration
 
 async def metrics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show current metrics in a Telegram-friendly format."""
-    if not update.effective_user or update.effective_user.id not in ADMIN_USER_IDS:
+    config = load_configuration()
+    if not update.effective_user or update.effective_user.id not in config.telegram.admin_user_ids:
         await update.message.reply_text("⛔️ Sorry, this command is only available for administrators.")
         return
 

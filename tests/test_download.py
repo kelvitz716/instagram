@@ -1,48 +1,72 @@
+"""Tests for Instagram content downloading functionality."""
 import asyncio
-import logging
+import pytest
 from pathlib import Path
+from unittest.mock import Mock, patch
+
 from src.services.instagram_downloader import InstagramDownloader
 from src.core.config import InstagramConfig
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Mark all tests in this module as asyncio tests
+pytestmark = pytest.mark.asyncio
 
-INSTAGRAM_USERNAME = "kelvitz"  # Replace with your username
+@pytest.fixture
+def downloads_path(tmp_path):
+    """Create a temporary downloads directory."""
+    return tmp_path / "downloads"
 
-async def main():
-    # Create a basic config
+@pytest.fixture
+def instagram_config():
+    """Create a test configuration."""
     config = InstagramConfig()
-    config.download_timeout = 60  # 60 seconds timeout
-    config.username = INSTAGRAM_USERNAME
-    
-    # Initialize downloader
-    downloads_path = Path("downloads")
-    downloader = InstagramDownloader(config, downloads_path)
-    
-    # Test URLs - uncomment the one you want to test
-    urls = [
-        "https://www.instagram.com/reel/DNoA2UTuClw/",  # Replace with a post/reel URL
-        "https://www.instagram.com/stories/orcwaifu/",  # Replace with a username that has stories
+    config.download_timeout = 5  # Short timeout for tests
+    config.username = "test_user"  # Test username
+    return config
+
+@pytest.fixture
+def downloader(downloads_path, instagram_config):
+    """Create an InstagramDownloader instance."""
+    return InstagramDownloader(instagram_config, downloads_path)
+
+@pytest.mark.parametrize("url,expected_files", [
+    ("https://www.instagram.com/p/test123/", ["test_image.jpg"]),
+    ("https://www.instagram.com/reel/test456/", ["test_video.mp4"]),
+])
+async def test_download_post(downloader, downloads_path, url, expected_files):
+    """Test downloading various types of Instagram posts."""
+    # Mock the actual download function
+    with patch.object(downloader, '_download_post') as mock_download:
+        mock_files = [downloads_path / f for f in expected_files]
+        mock_download.return_value = mock_files
+        
+        # Perform the download
+        files = await downloader.download_post(url)
+        
+        # Verify results
+        assert files == mock_files
+        mock_download.assert_called_once_with(url)
+
+async def test_download_stories(downloader, downloads_path):
+    """Test downloading Instagram stories."""
+    username = "test_user"
+    expected_files = [
+        downloads_path / "story_1.jpg",
+        downloads_path / "story_2.mp4"
     ]
     
-    for url in urls:
-        print(f"\nTesting URL: {url}")
-        try:
-            if "/stories/" in url:
-                username = url.split("/stories/")[1].split("/")[0]
-                files = await downloader.download_stories(username)
-            else:
-                files = await downloader.download_post(url)
-            
-            if files:
-                print(f"Successfully downloaded {len(files)} files:")
-                for f in files:
-                    print(f"  - {f}")
-            else:
-                print("No files downloaded")
-                
-        except Exception as e:
-            print(f"Error: {e}")
+    # Mock the story download function
+    with patch.object(downloader, '_download_stories') as mock_download:
+        mock_download.return_value = expected_files
+        
+        # Perform the download
+        files = await downloader.download_stories(username)
+        
+        # Verify results
+        assert files == expected_files
+        mock_download.assert_called_once_with(username)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+async def test_download_error_handling(downloader):
+    """Test error handling during downloads."""
+    with patch.object(downloader, '_download_post', side_effect=Exception("Network error")):
+        with pytest.raises(Exception, match="Network error"):
+            await downloader.download_post("https://www.instagram.com/p/invalid/")

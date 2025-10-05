@@ -35,6 +35,16 @@ class TelethonUploader(UploaderBase):
         if not await self.client.is_user_authorized():
             logger.error("Telethon client is not authorized")
             raise RuntimeError("Telethon client is not authorized")
+            
+    async def is_authorized(self) -> bool:
+        """Check if the Telethon client is authorized."""
+        try:
+            if not self.client.is_connected():
+                await self.client.connect()
+            return await self.client.is_user_authorized()
+        except Exception as e:
+            logger.error(f"Error checking authorization: {e}")
+            return False
     
     def can_handle(self, file_path: Path) -> bool:
         """Telethon can handle files of any size"""

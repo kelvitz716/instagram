@@ -16,20 +16,46 @@ class SessionCommands:
     """Mixin class for session management commands."""
     
     async def handle_session_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle the /session_upload command."""
+        """Handle the /session command and cookie file uploads."""
         if not update.message or not update.effective_user:
             return
             
-        # Check if a file was uploaded
+        # Check if this is just the command without a file
         if not update.message.document:
-            await update.message.reply_text(
-                "Please upload a cookies.txt file with this command.\n\n"
-                "You can export cookies from Firefox using extensions like:\n"
-                "- 'Export Cookies'\n"
-                "- 'Cookie Quick Manager'\n\n"
-                "The file must be in Netscape format and contain Instagram cookies."
-            )
+            if not update.message.caption or update.message.caption.strip().lower() != "/session":
+                await update.message.reply_text(
+                    "Please upload your cookies.txt file and add '/session' as the caption.\n\n"
+                    "You can export cookies from Firefox using extensions like:\n"
+                    "- 'Export Cookies'\n"
+                    "- 'Cookie Quick Manager'\n\n"
+                    "The file must be in Netscape format and contain Instagram cookies."
+                )
             return
+
+        # Check if this is a file upload with /session caption
+        if update.message.caption and update.message.caption.strip().lower() == "/session":
+            try:
+                # Download the file to a unique temp path
+                file = await context.bot.get_file(update.message.document.file_id)
+                temp_path = Path(f"/tmp/cookies_{update.effective_user.id}_{datetime.now().timestamp()}.txt")
+                
+                # Download the file
+                await file.download_to_drive(temp_path)
+                
+                # Process the cookies file
+                await self._process_cookies_file(update, temp_path)
+                
+            except Exception as e:
+                logger.error(f"Failed to process cookie file: {e}", exc_info=True)
+                await update.message.reply_text(
+                    f"❌ Failed to process the cookie file: {str(e)}\n\n"
+                    "Please make sure it's a valid Netscape format cookies.txt file."
+                )
+                
+            finally:
+                # Clean up temp file
+                if temp_path.exists():
+                    temp_path.unlink()
             
         try:
             # Download the file
@@ -210,3 +236,29 @@ class SessionCommands:
                 logger.info(f"Cleaned up {count} expired sessions")
         except Exception as e:
             logger.error(f"Failed to cleanup expired sessions: {e}")
+            
+    async def _process_cookies_file(self, update: Update, temp_path: Path):
+        """Process and validate an uploaded cookies file."""
+        try:
+            # Copy to destination with proper permissions
+            cookies_dst = Path("gallery-dl-cookies.txt")
+            
+            # Read cookies first to validate
+            cookies_content = temp_path.read_text()
+            if "instagram.com" not in cookies_content:
+                raise ValueError("No Instagram cookies found in file")
+                
+            # Write atomically to avoid file busy errors
+            temp_dest = cookies_dst.with_suffix(".txt.tmp")
+            temp_dest.write_text(cookies_content)
+            temp_dest.chmod(0o644)  # Set proper permissions
+            temp_dest.rename(cookies_dst)
+            
+            await update.message.reply_text(
+                "✅ Cookie file processed and activated successfully!\n"
+                "The bot will now use these cookies for Instagram requests."
+            )
+            
+        except Exception as e:
+            logger.error(f"Error processing cookies: {e}", exc_info=True)
+            raise ValueError(f"Failed to process cookies: {str(e)}")

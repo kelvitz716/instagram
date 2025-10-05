@@ -2,6 +2,7 @@
 
 import sys
 import logging
+import logging.handlers
 import structlog
 import orjson
 from typing import Any, Dict, Optional
@@ -14,9 +15,11 @@ def serialize_datetime(dt: datetime) -> str:
     """Serialize datetime objects to ISO format."""
     return dt.isoformat() + "Z"
 
-def serialize_to_json(obj: Any) -> str:
+def serialize_to_json(obj: Any, **kwargs) -> str:
     """Custom JSON serializer that handles datetime objects."""
-    return orjson.dumps(obj, default=serialize_datetime).decode('utf-8')
+    # Get the default serializer from kwargs or use our own
+    default = kwargs.get('default', serialize_datetime)
+    return orjson.dumps(obj, default=default).decode('utf-8')
 
 def setup_structured_logging(config: LoggingConfig) -> None:
     """Configure structured logging with the given configuration."""
