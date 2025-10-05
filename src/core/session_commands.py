@@ -19,17 +19,28 @@ class SessionCommands:
         """Handle the /session command and cookie file uploads."""
         if not update.message or not update.effective_user:
             return
-            
+
         # Check if this is just the command without a file
         if not update.message.document:
-            if not update.message.caption or update.message.caption.strip().lower() != "/session":
-                await update.message.reply_text(
-                    "Please upload your cookies.txt file and add '/session' as the caption.\n\n"
-                    "You can export cookies from Firefox using extensions like:\n"
-                    "- 'Export Cookies'\n"
-                    "- 'Cookie Quick Manager'\n\n"
-                    "The file must be in Netscape format and contain Instagram cookies."
-                )
+            keyboard = [
+                [InlineKeyboardButton("📤 Upload Cookies", callback_data="upload_cookies")],
+                [InlineKeyboardButton("📋 List Sessions", callback_data="list_sessions")],
+                [InlineKeyboardButton("ℹ️ Check Status", callback_data="check_status")]
+            ]
+            
+            await update.message.reply_text(
+                "🔐 *Instagram Session Management*\n\n"
+                "What would you like to do?\n\n"
+                "• *Upload* new cookies file\n"
+                "• *List* your active sessions\n"
+                "• *Check* session status\n\n"
+                "_To upload cookies, you can export them from browsers using:_\n"
+                "• Export Cookies (Firefox)\n"
+                "• Cookie Quick Manager\n"
+                "• EditThisCookie (Chrome)",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
             return
 
         # Check if this is a file upload with /session caption
@@ -103,13 +114,28 @@ class SessionCommands:
             return
             
         try:
-            # Get all sessions for the user
+            # Validate storage
+            storage_status = await self.services.session_storage.check_storage()
+            if not storage_status['healthy']:
+                await update.message.reply_text(
+                    "⚠️ *Warning:* Session storage issues detected\n\n"
+                    f"Issues found: {storage_status['issues']}\n"
+                    "Some features may be limited.",
+                    parse_mode='Markdown'
+                )
+            
+            # Get all sessions with statistics
             sessions = await self.services.session_storage.get_all_sessions(update.effective_user.id)
+            stats = await self.services.session_storage.get_session_stats(update.effective_user.id)
             
             if not sessions:
+                keyboard = [[InlineKeyboardButton("📤 Upload New Session", callback_data="upload_cookies")]]
                 await update.message.reply_text(
+                    "📭 *No Active Sessions*\n\n"
                     "You don't have any Instagram sessions stored.\n"
-                    "Use /session_upload to add a new session from a cookies.txt file."
+                    "Would you like to upload a new session?",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
                 )
                 return
                 
@@ -228,6 +254,55 @@ class SessionCommands:
             logger.error(f"Failed to handle session button: {e}")
             await query.edit_message_text("❌ An error occurred. Please try again.")
             
+    async def handle_session_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Check the status of Instagram sessions."""
+        if not update.effective_user:
+            return
+            
+        try:
+            # Get active session
+            active_session = await self.services.session_storage.get_active_session(update.effective_user.id)
+            if not active_session:
+                await update.message.reply_text(
+                    "❌ No active session found.\n"
+                    "Please upload a session first."
+                )
+                return
+                
+            # Check session health
+            status = await self.session_manager.validate_session(active_session['id'])
+            stats = await self.services.session_storage.get_session_stats(update.effective_user.id)
+            
+            response = [
+                "📊 *Session Status Report*\n",
+                f"Session ID: `{active_session['id']}`\n",
+                f"Type: {active_session['session_type']}\n",
+                f"Health: {'✅ Good' if status['valid'] else '❌ Invalid'}\n",
+                f"Downloads: {stats['total_downloads']}\n",
+                f"Success Rate: {stats['success_rate']}%\n",
+                "\n*Storage Stats:*\n",
+                f"Space Used: {stats['storage_used']}\n",
+                f"Downloads Today: {stats['downloads_today']}\n",
+                f"Average Size: {stats['avg_download_size']}\n"
+            ]
+            
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh Status", callback_data=f"refresh_status_{active_session['id']}")],
+                [InlineKeyboardButton("🗑 Clear Cache", callback_data="clear_cache")]
+            ]
+            
+            await update.message.reply_text(
+                "".join(response),
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to check session status: {e}")
+            await update.message.reply_text(
+                "❌ Failed to check session status. Please try again later."
+            )
+    
     async def cleanup_expired_sessions(self) -> None:
         """Clean up expired sessions. Called periodically by the maintenance task."""
         try:

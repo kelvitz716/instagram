@@ -306,15 +306,15 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             logger.error(error_msg, exc_info=True)
             await progress_msg.edit_text(error_msg)
             
-    async def _upload_large_file(self, message: Message, file: Path, context: ContextTypes.DEFAULT_TYPE):
-    # Upload large files using Telethon
+    async def _upload_large_file(self, message: Message, file: Path, context: ContextTypes.DEFAULT_TYPE, caption: str = None):
+        # Upload large files using Telethon
         uploader = self.services.get(TelethonUploader)
-        await uploader.upload(file)
+        await uploader.upload(file, caption=caption)
         
-    async def _upload_small_file(self, message: Message, file: Path, content_type: str):
-    # Upload small files using Bot API
+    async def _upload_small_file(self, message: Message, file: Path, content_type: str, caption: str = None):
+        # Upload small files using Bot API
         uploader = self.services.get(BotAPIUploader)
-        await uploader.upload(file, content_type)
+        await uploader.upload(file, caption=caption)
         
     async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
     # Handle bot errors
@@ -412,32 +412,76 @@ class EnhancedTelegramBot(SessionCommands, HelpCommandMixin):
             status_msg = await update.message.reply_text(
                 "🔄 Processing Instagram link..."
             )
-            
-            # Extract and process Instagram URL
+
             url = update.message.text.strip()
             downloaded_files = await self.services.instagram_service.download_content(url)
-            
             if not downloaded_files:
                 await status_msg.edit_text("❌ Download failed: No content found")
                 return
-                
-            # Update status
+
+            # Try to extract metadata from the first file
+            meta = {}
+            try:
+                meta = await self.services.instagram_service._extract_metadata(downloaded_files[0])
+            except Exception as e:
+                logger.warning(f"Metadata extraction failed: {e}")
+
+            media_count = len(downloaded_files)
+            caption = meta.get('caption', '').strip() or 'Instagram Post'
+            username = meta.get('username', '')
+            post_url = meta.get('url', url)
+
+            # Announce post processed and counts
             await status_msg.edit_text(
-                f"✅ Downloaded {len(downloaded_files)} file(s)\n"
+                f"📷 Post processed!\n"
+                f"📥 Downloaded: {media_count} files\n"
+                f"📤 Uploaded: 0/{media_count} files\n"
                 f"⬆️ Uploading to Telegram..."
             )
-            
-            # Upload each file
-            for file_path in downloaded_files:
+
+            # Send summary message before media
+            summary_caption = (
+                f"📷 Instagram Post\n\n"
+                f"{caption}\n\n"
+                f"📱 Total media: {media_count}\n\n"
+                f"🔗 {post_url}\n\n"
+                f"📌 Media 1/{media_count}"
+            )
+
+            upload_count = 0
+            for idx, file_path in enumerate(downloaded_files, 1):
                 file_size = file_path.stat().st_size
                 mime_type = "video/mp4" if file_path.suffix.lower() == '.mp4' else "image/jpeg"
-                if file_size > 50 * 1024 * 1024:  # 50MB
-                    await self._upload_large_file(update.message, file_path, context)
+                is_first = idx == 1
+
+                # Prepare caption
+                caption = summary_caption if is_first else f"Media {idx}/{media_count} - Part of post"
+                
+                if file_size > 50 * 1024 * 1024:
+                    await self._upload_large_file(update.message, file_path, context, caption)
                 else:
-                    await self._upload_small_file(update.message, file_path, mime_type)
-                    
+                    await self._upload_small_file(update.message, file_path, mime_type, caption)
+                upload_count += 1
+                
+                # Update progress every 3rd file or on last file
+                if idx % 3 == 0 or idx == media_count:
+                    await status_msg.edit_text(
+                        f"📷 Post processed!\n"
+                        f"📥 Downloaded: {media_count} files\n"
+                        f"📤 Uploaded: {upload_count}/{media_count} files\n"
+                        f"⬆️ Uploading to Telegram..."
+                    )
+
+            # Final summary
+            await update.message.reply_text(
+                f"📷 Post processed!\n"
+                f"📥 Downloaded: {media_count} files\n"
+                f"📤 Uploaded: {upload_count}/{media_count} files\n"
+                f"🎉 All files uploaded successfully!"
+            )
+
             await status_msg.delete()
-            
+
         except Exception as e:
             logger.error(f"Error processing Instagram link: {e}", exc_info=True)
             try:
